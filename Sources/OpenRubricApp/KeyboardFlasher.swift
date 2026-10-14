@@ -3,6 +3,16 @@ import AppKit
 import IOKit
 import IOKit.hid
 
+// MARK: - Apple vendor page constants
+//
+// Apple's built-in keyboards expose backlight through the vendor page
+// (0xFF00) rather than a standard HID usage, and these constants are
+// not shipped in the public headers (AppleHIDUsageTables.h is blank
+// since 10.14), so they are declared locally.
+private let appleVendorPage: UInt32 = 0xFF00
+private let topCaseUsage: UInt32 = 0x01          // TopCase collection
+private let keyboardBacklightUsage: UInt32 = 0x0F // KeyboardBacklight collection
+
 /// Keyboard output channels driven through IOKit HID.
 ///
 /// Both are best-effort: a keyboard without the relevant LED element or a
@@ -88,22 +98,34 @@ final class KeyboardFlasher: @unchecked Sendable {
     }
 
     /// Pulses the keyboard brightness element to 0 and restores it.
+    ///
+    /// Backlight elements show up in different shapes depending on the
+    /// hardware, so several element shapes are tried in order:
+    ///   - GenericDesktop 0x6F (some third-party HID keyboards)
+    ///   - Consumer page 0x79/0x7A increment/decrement
+    ///   - Apple vendor page: TopCase 0x01 (built-in MacBook keyboards)
+    ///     and KeyboardBacklight 0x0F — these live on the vendor page
+    ///     (0xFF00) and are not in the public HID usage tables, so the
+    ///     constants are local.
+    /// A keyboard exposing none of these simply doesn't pulse.
     private static func pulseBrightness(keyboard: IOHIDDeviceRef, times: Int, gap: Double) {
-        // Brightness is exposed as a GenericDesktop attribute/output on
-        // keyboards that support it (usage 0x6F). Some hardware only
-        // exposes it through the private CoreBrightness framework — those
-        // simply have no matching element and are skipped.
-        guard let element = firstElement(
-            keyboard: keyboard,
-            usagePage: kHIDPage_GenericDesktop,
-            usage: kHIDUsage_GD_KeyboardBrightness,
-            type: kIOHIDElementTypeAttribute
-        ) ?? firstElement(
-            keyboard: keyboard,
-            usagePage: kHIDPage_GenericDesktop,
-            usage: kHIDUsage_GD_KeyboardBrightness,
-            type: kIOHIDElementTypeOutput
-        ) else { return }
+        let candidates: [(page: UInt32, usage: UInt32, type: Int)] = [
+            // Built-in MacBook keyboards (Apple vendor page).
+            (appleVendorPage, keyboardBacklightUsage, kIOHIDElementTypeFeature),
+            (appleVendorPage, keyboardBacklightUsage, kIOHIDElementTypeOutput),
+            (appleVendorPage, topCaseUsage, kIOHIDElementTypeFeature),
+            (appleVendorPage, topCaseUsage, kIOHIDElementTypeOutput),
+            // Some third-party HID keyboards.
+            (kHIDPage_Consumer, kHIDUsage_Csmr_KeyboardBrightnessIncrement, kIOHIDElementTypeFeature),
+            // 0x6F is not a standard GenericDesktop usage; some third-party
+            // keyboards nonetheless expose brightness there, so it costs
+            // nothing to try.
+            (kHIDPage_GenericDesktop, 0x6F, kIOHIDElementTypeFeature),
+            (kHIDPage_GenericDesktop, 0x6F, kIOHIDElementTypeOutput)
+        ]
+        guard let element = candidates.lazy.compactMap {
+            firstElement(keyboard: keyboard, usagePage: $0.page, usage: $0.usage, type: $0.type)
+        }.first else { return }
 
         var currentValue: IOHIDValueRef?
         _ = IOHIDDeviceGetValue(keyboard, element, &currentValue)
