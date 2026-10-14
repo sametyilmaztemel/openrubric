@@ -24,6 +24,7 @@ final class AppModel {
     private let capture = ScreenCaptureService()
     private let panel: AnswerPanel
     private let hotkey: HotkeyManager
+    private let flash: FlashCoordinator
 
     private(set) var phase: Phase = .idle
     private var inFlight: Task<Void, Never>?
@@ -31,10 +32,12 @@ final class AppModel {
     /// Fired after every cycle so the menu bar can reflect status.
     var onPhaseChange: (@MainActor (Phase) -> Void)?
 
-    init(store: AppSettingsStore, panel: AnswerPanel, hotkey: HotkeyManager) {
+    init(store: AppSettingsStore, panel: AnswerPanel, hotkey: HotkeyManager,
+         flash: FlashCoordinator = FlashCoordinator()) {
         self.store = store
         self.panel = panel
         self.hotkey = hotkey
+        self.flash = flash
     }
 
     func startHotkey() {
@@ -78,6 +81,9 @@ final class AppModel {
                 )
                 let parsed = AnswerParser.parse(raw, mode: .init(promptMode: settings.promptMode))
                 panel.show(parsed, nearCursor: cursor)
+                if let plan = FlashPlanner.plan(for: parsed, enabled: settings.flashChannels) {
+                    flash.flash(plan)
+                }
                 setPhase(.presenting)
             } catch {
                 panel.hide()

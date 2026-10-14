@@ -22,6 +22,8 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
     public var includeExplanation: Bool
     /// Crop side is `2 * cropRadius` (points).
     public var cropRadius: CGFloat
+    /// Discreet output channels that fire after a multiple-choice answer.
+    public var flashChannels: Set<FlashChannel>
 
     public init(
         apiProvider: ApiProvider = .anthropic,
@@ -29,7 +31,8 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         model: String? = nil,
         promptMode: PromptMode = .multipleChoice,
         includeExplanation: Bool = true,
-        cropRadius: CGFloat = 260
+        cropRadius: CGFloat = 260,
+        flashChannels: Set<FlashChannel> = [.capsLockLED]
     ) {
         self.apiProvider = apiProvider
         self.baseURL = baseURL ?? Self.defaultBaseURL(for: apiProvider)
@@ -37,6 +40,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         self.promptMode = promptMode
         self.includeExplanation = includeExplanation
         self.cropRadius = cropRadius
+        self.flashChannels = flashChannels
     }
 
     /// The Messages API endpoint, not an OpenAI-style `/v1` URL.
