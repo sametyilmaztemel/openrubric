@@ -71,7 +71,7 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
               components.scheme != nil, components.host != nil else {
             throw Error.invalidBaseURL(configuration.baseURL)
         }
-        var path = components.path ?? ""
+        var path = components.pathString
         while path.hasSuffix("/") { path.removeLast() }
         components.path = path + "/chat/completions"
         guard let resolved = components.url else {

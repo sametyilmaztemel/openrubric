@@ -64,7 +64,7 @@ public struct AnthropicClient: ChatCompletionsClient, @unchecked Sendable {
               components.scheme != nil, components.host != nil else {
             throw Error.invalidBaseURL(configuration.baseURL)
         }
-        var path = components.path ?? ""
+        var path = components.pathString
         while path.hasSuffix("/") { path.removeLast() }
         // Official API: https://api.anthropic.com        -> /v1/messages
         // Proxy already exposing /v1: .../anthropic/v1  -> /messages

@@ -64,10 +64,8 @@ public enum CropGeometry {
         }
 
         let rect = CGRect(x: x, y: y, width: side, height: side)
-        let overlap = CGRect.intersection(
-            rect,
-            CGRect(x: display.origin.x, y: display.origin.y,
-                   width: display.width, height: display.height)
+        let overlap = rect.intersection(
+            CGRect(origin: display.origin, size: display.size)
         )
         guard overlap.width >= minimumSize, overlap.height >= minimumSize else {
             return nil
