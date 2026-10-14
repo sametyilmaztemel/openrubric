@@ -19,3 +19,9 @@ jobs:
         run: swift test --parallel
       - name: Build menu bar app (OpenRubric)
         run: swift build --product OpenRubric
+      - name: Assemble .app bundle (Info.plist)
+        run: |
+          mkdir -p build/OpenRubric.app/Contents/MacOS
+          cp .build/debug/OpenRubric build/OpenRubric.app/Contents/MacOS/
+          cp Resources/Info.plist build/OpenRubric.app/Contents/
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" build/OpenRubric.app/Contents/Info.plist

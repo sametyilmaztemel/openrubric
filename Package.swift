@@ -25,8 +25,7 @@ products.append(.executable(name: "OpenRubric", targets: ["OpenRubricApp"]))
 targets.append(
     .executableTarget(
         name: "OpenRubricApp",
-        dependencies: ["OpenRubricCore"],
-        resources: [.copy("Resources/Info.plist")]
+        dependencies: ["OpenRubricCore"]
     )
 )
 #endif
