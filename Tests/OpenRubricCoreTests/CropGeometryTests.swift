@@ -66,7 +66,13 @@ struct CropSamplingTests {
                             bitsPerComponent: 8, bytesPerRow: width * 4,
                             space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         // Fill with a solid color so we can assert non-null output.
-        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        // The color is defined in the SAME device-RGB space as the
+        // context (components [1,0,0,1]), so no color-space conversion
+        // runs at fill time — on a headless CI runner a CGColor made in
+        // the default (sRGB) space converts to ~(255, 38, 0) in device
+        // space, which would corrupt the red-channel assertion.
+        let red = CGColor(colorSpace: cs, components: [1, 0, 0, 1])!
+        ctx.setFillColor(red)
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return ctx.makeImage()!
     }
@@ -80,6 +86,63 @@ struct CropSamplingTests {
         // radius 260 * 2 = 520 pt, 2x scale => 1040 px
         #expect(cropped!.width == 1040)
         #expect(cropped!.height == 1040)
+    }
+
+    /// Draws the crop into a known RGBA8 bitmap context and reads one
+    /// pixel. Sampling through an explicit context is far more reliable
+    /// than parsing `dataProvider`'s raw bytes, whose byte order and
+    /// layout are not guaranteed after a `cropping(to:)` (on Darwin the
+    /// provider can come back in a different order than the 8-bit
+    /// `premultipliedLast` context we built the source in).
+    private func samplePixel(_ image: CGImage, x: Int, y: Int) -> [UInt8] {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8,
+            bytesPerRow: 4, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        ctx.draw(image, in: CGRect(x: -x, y: -y, width: image.width, height: image.height))
+        guard let buf = ctx.data else { return [0, 0, 0, 0] }
+        let base = buf.assumingMemoryBound(to: UInt8.self)
+        return [base[0], base[1], base[2], base[3]]
+    }
+
+    @Test("a crop on a secondary display (non-zero origin) samples the right pixels")
+    func secondaryDisplayOriginOffset() {
+        // A secondary display placed to the right of a primary one:
+        // its global origin is (1512, 0) in top-left screen coordinates.
+        let secondary = DisplayRect(origin: CGPoint(x: 1512, y: 0),
+                                    size: CGSize(width: 1512, height: 982))
+        // A solid-color image covering ONLY the secondary display at 1x.
+        let image = makeImage(width: 1512, height: 982)
+
+        // Cursor near the LEFT edge of the secondary display: a global
+        // crop straddling the display's left border must be clamped to
+        // the display and must sample the image's left edge (x=0..),
+        // not the region offset by the display's global origin.
+        let cursor = CGPoint(x: 1512 + 60, y: 491)
+        let crop = CropGeometry.crop(cursor: cursor, radius: 260, display: secondary)!
+        let cropped = CropGeometry.cropped(image, crop: crop)
+        #expect(cropped != nil)
+        // Clamped to the display edge: width = (1512-60+260... no, the
+        // clamp slides the crop fully inside => full 520 pt side.
+        #expect(cropped!.width == 520)
+        #expect(cropped!.height == 520)
+
+        // Sample a pixel at the crop's center: it must equal the solid
+        // fill color. (The nil/size assertions above already catch the
+        // origin-offset bug — a wrong translation runs the region off
+        // the image; this guards against a shift that stays in bounds.)
+        let pixel = samplePixel(
+            cropped!, x: cropped!.width / 2, y: cropped!.height / 2
+        )
+        // The 1x1 context above is 8-bit premultipliedLast, so the byte
+        // order is exactly RGBA: solid red at full alpha reads as
+        // (255, 0, 0, 255).
+        #expect(pixel[0] == 255)
+        #expect(pixel[1] == 0)
+        #expect(pixel[2] == 0)
+        #expect(pixel[3] == 255)
     }
 }
 #endif

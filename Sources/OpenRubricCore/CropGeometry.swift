@@ -83,12 +83,17 @@ public enum CropGeometry {
         let scale = crop.displayRect.width > 0
             ? CGFloat(image.width) / crop.displayRect.width
             : 1
+        // cropRect is in global display coordinates; the captured image
+        // covers only THIS display, so translate by the display's origin
+        // before scaling (secondary displays have non-zero origins).
+        let ox = crop.displayRect.minX
+        let oy = crop.displayRect.minY
         // Round the two edges independently and derive the size from them,
         // so fractional scales cannot shift or shrink the crop by a pixel.
-        let x0 = (crop.cropRect.minX * scale).rounded()
-        let y0 = (crop.cropRect.minY * scale).rounded()
-        let x1 = (crop.cropRect.maxX * scale).rounded()
-        let y1 = (crop.cropRect.maxY * scale).rounded()
+        let x0 = ((crop.cropRect.minX - ox) * scale).rounded()
+        let y0 = ((crop.cropRect.minY - oy) * scale).rounded()
+        let x1 = ((crop.cropRect.maxX - ox) * scale).rounded()
+        let y1 = ((crop.cropRect.maxY - oy) * scale).rounded()
         let region = CGRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0))
             .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
         guard !region.isEmpty else { return nil }
