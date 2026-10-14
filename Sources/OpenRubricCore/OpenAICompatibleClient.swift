@@ -35,12 +35,15 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
     }
 
     public enum Error: LocalizedError {
+        case invalidBaseURL(String)
         case http(status: Int, body: String)
         case decoding(String)
         case emptyContent
 
         public var errorDescription: String? {
             switch self {
+            case .invalidBaseURL(let url):
+                return "Invalid base URL: \"\(url.prefix(80))\" (expected e.g. https://api.openai.com/v1)"
             case .http(let status, let body):
                 return "HTTP \(status): \(body.prefix(300))"
             case .decoding(let detail):
@@ -54,13 +57,27 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
     public let configuration: Configuration
     /// Injected for tests; default is `URLSession.shared`.
     public let session: URLSession
-    /// Injected for tests.
-    public let url: URL
+    /// Resolved `POST` target.
+    let url: URL
 
-    public init(configuration: Configuration, session: URLSession = .shared) {
+    public init(configuration: Configuration, session: URLSession = .shared) throws {
         self.configuration = configuration
         self.session = session
-        self.url = URL(string: configuration.baseURL)!.appending(path: "chat/completions")
+        // Settings come from a plain text field: trim before parsing so
+        // " https://api.openai.com/v1 " does not crash the app. Trailing
+        // slashes and query strings are handled by path-level resolution.
+        let trimmed = configuration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              components.scheme != nil, components.host != nil else {
+            throw Error.invalidBaseURL(configuration.baseURL)
+        }
+        var path = components.pathString
+        while path.hasSuffix("/") { path.removeLast() }
+        components.path = path + "/chat/completions"
+        guard let resolved = components.url else {
+            throw Error.invalidBaseURL(configuration.baseURL)
+        }
+        self.url = resolved
     }
 
     public func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> String {
@@ -100,10 +117,12 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let choices = json["choices"] as? [[String: Any]],
             let message = choices.first?["message"] as? [String: Any],
-            let content = message["content"] as? String,
-            !content.isEmpty
+            let content = message["content"] as? String
         else {
             throw Error.decoding(String(decoding: data.prefix(500), as: UTF8.self))
+        }
+        guard !content.isEmpty else {
+            throw Error.emptyContent
         }
         return content
     }

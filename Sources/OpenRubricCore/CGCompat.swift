@@ -54,12 +54,23 @@ public struct CGRect: Equatable, Sendable {
 
     public var isEmpty: Bool { size.width <= 0 || size.height <= 0 }
 
-    public static func intersection(_ a: CGRect, _ b: CGRect) -> CGRect {
-        let x1 = max(a.minX, b.minX)
-        let y1 = max(a.minY, b.minY)
-        let x2 = min(a.maxX, b.maxX)
-        let y2 = min(a.maxY, b.maxY)
+    public func intersection(_ other: CGRect) -> CGRect {
+        let x1 = max(minX, other.minX)
+        let y1 = max(minY, other.minY)
+        let x2 = min(maxX, other.maxX)
+        let y2 = min(maxY, other.maxY)
         return CGRect(x: x1, y: y1, width: max(0, x2 - x1), height: max(0, y2 - y1))
     }
 }
 #endif
+
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+extension URLComponents {
+    /// `path` is a non-optional `String` on both Darwin Foundation and
+    /// swift-corelibs-foundation; kept as a single accessor so the URL
+    /// plumbing in the clients stays platform-agnostic.
+    var pathString: String { path }
+}

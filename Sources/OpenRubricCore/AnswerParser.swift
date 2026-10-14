@@ -209,9 +209,9 @@ public enum AnswerParser {
             return String(c).uppercased()
         }
         if mode == .multipleChoice {
-            // "Option B" / "B." style: first standalone letter.
-            if let m = value.range(of: #"\b([A-Z])\b"#, options: .regularExpression) {
-                return String(value[m]).first.map { String($0) }
+            // "Option B" / "b." style: first standalone letter (case-insensitive).
+            if let m = value.range(of: #"\b([A-Z])\b"#, options: [.regularExpression, .caseInsensitive]) {
+                return String(value[m]).first.map { String($0).uppercased() }
             }
         }
         return nil
@@ -221,7 +221,19 @@ public enum AnswerParser {
 extension ParsedAnswer.Confidence {
     init?(matching raw: String) {
         let t = raw.lowercased().trimmingCharacters(in: .whitespaces)
-        for c in ParsedAnswer.Confidence.allCases where t.hasPrefix(c.rawValue) {
+        // Turkish synonyms (the parser accepts Turkish keys too).
+        let normalized: String
+        switch t {
+        case "yüksek", "yuksek", "certain":
+            normalized = "high"
+        case "orta", "moderate":
+            normalized = "medium"
+        case "düşük", "dusuk":
+            normalized = "low"
+        default:
+            normalized = t
+        }
+        for c in ParsedAnswer.Confidence.allCases where normalized.hasPrefix(c.rawValue) {
             self = c
             return
         }

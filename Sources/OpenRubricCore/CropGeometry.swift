@@ -64,7 +64,9 @@ public enum CropGeometry {
         }
 
         let rect = CGRect(x: x, y: y, width: side, height: side)
-        let overlap = CGRect.intersection(rect, CGRect(origin: display.origin, size: display.size))
+        let overlap = rect.intersection(
+            CGRect(origin: display.origin, size: display.size)
+        )
         guard overlap.width >= minimumSize, overlap.height >= minimumSize else {
             return nil
         }
@@ -81,11 +83,13 @@ public enum CropGeometry {
         let scale = crop.displayRect.width > 0
             ? CGFloat(image.width) / crop.displayRect.width
             : 1
-        let x = crop.cropRect.minX * scale
-        let y = crop.cropRect.minY * scale
-        let w = crop.cropRect.width * scale
-        let h = crop.cropRect.height * scale
-        let region = CGRect(x: x.rounded(), y: y.rounded(), width: w.rounded(), height: h.rounded())
+        // Round the two edges independently and derive the size from them,
+        // so fractional scales cannot shift or shrink the crop by a pixel.
+        let x0 = (crop.cropRect.minX * scale).rounded()
+        let y0 = (crop.cropRect.minY * scale).rounded()
+        let x1 = (crop.cropRect.maxX * scale).rounded()
+        let y1 = (crop.cropRect.maxY * scale).rounded()
+        let region = CGRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0))
             .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
         guard !region.isEmpty else { return nil }
         return image.cropping(to: region)

@@ -29,19 +29,30 @@ struct PromptBuilderTests {
 
 @Suite("OpenRubricSettings")
 struct SettingsTests {
-    @Test("defaults point at OpenAI")
+    @Test("defaults target Anthropic Claude Haiku")
     func defaults() {
         let s = OpenRubricSettings()
-        #expect(s.baseURL == "https://api.openai.com/v1")
-        #expect(s.model == "gpt-4o-mini")
+        #expect(s.apiProvider == .anthropic)
+        #expect(s.baseURL == "https://api.anthropic.com")
+        #expect(s.model == "claude-haiku-5-5")
         #expect(s.promptMode == .multipleChoice)
+    }
+
+    @Test("provider switch updates default endpoint and model")
+    func providerSwitch() {
+        let openAI = OpenRubricSettings(apiProvider: .openAICompatible)
+        #expect(openAI.baseURL == "https://api.openai.com/v1")
+        #expect(openAI.model == "gpt-4o-mini")
+        let anthropic = OpenRubricSettings(apiProvider: .anthropic)
+        #expect(anthropic.baseURL == "https://api.anthropic.com")
     }
 
     @Test("Codable round-trip preserves all fields")
     func roundTrip() throws {
         let original = OpenRubricSettings(
-            baseURL: "http://localhost:11434/v1",
-            model: "llama3.2-vision",
+            apiProvider: .anthropic,
+            baseURL: "https://api.minimax.io/anthropic",
+            model: "claude-haiku-5-5",
             promptMode: .shortAnswer,
             includeExplanation: false,
             cropRadius: 120
@@ -52,12 +63,22 @@ struct SettingsTests {
         #expect(decoded.cropRadius == 120)
     }
 
-    @Test("client configuration maps fields")
-    func clientConfig() {
+    @Test("makeClient builds an AnthropicClient for the anthropic provider")
+    func makeClientAnthropic() throws {
         let s = OpenRubricSettings()
-        let c = s.clientConfiguration(apiKey: "sk-test")
-        #expect(c.baseURL == s.baseURL)
-        #expect(c.model == s.model)
-        #expect(c.apiKey == "sk-test")
+        let client = try s.makeClient(apiKey: "sk-test")
+        let anthropic = client as? AnthropicClient
+        #expect(anthropic != nil)
+        #expect(anthropic!.configuration.model == "claude-haiku-5-5")
+        #expect(anthropic!.configuration.baseURL == "https://api.anthropic.com")
+    }
+
+    @Test("makeClient builds an OpenAICompatibleClient for the openAI provider")
+    func makeClientOpenAI() throws {
+        let s = OpenRubricSettings(apiProvider: .openAICompatible)
+        let client = try s.makeClient(apiKey: "sk-test")
+        let openAI = client as? OpenAICompatibleClient
+        #expect(openAI != nil)
+        #expect(openAI!.configuration.model == "gpt-4o-mini")
     }
 }
