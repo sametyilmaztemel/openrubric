@@ -13,7 +13,10 @@ enum KeychainStore {
         case itemError(OSStatus)
 
         var errorDescription: String? {
-            "Keychain operation failed (status \(itemError))."
+            if case .itemError(let status) = self {
+                return "Keychain operation failed (status \(status))."
+            }
+            return nil
         }
     }
 

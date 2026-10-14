@@ -102,15 +102,12 @@ extension AppModel {
     /// The cursor as a point in **global top-left display coordinates**
     /// (the space `SCShareableDisplay.frame` and `CropGeometry` use).
     ///
-    /// `NSEvent.mouseLocation` is in AppKit's bottom-left global space,
-    /// and per-screen AppKit-to-display-origin conversions are
-    /// error-prone on mirrored/secondary displays, so we anchor on the
-    /// screen the cursor is actually on:
-    ///
-    ///   globalTopLeftY = screen.frame.minY + (screen.frame.maxY - mouseLocation.y)
-    ///
-    /// Both `screen.frame` and `mouseLocation` are in the same
-    /// bottom-left global space, so the per-screen math holds.
+    /// `NSEvent.mouseLocation` is in AppKit's bottom-left global space;
+    /// the two spaces share the primary display's corner as their origin
+    /// (one top-left, the other bottom-left), so y is a mirror about the
+    /// primary's height and x is shared verbatim. Per-screen conversion
+    /// formulas are error-prone on secondary/mirrored displays, so the
+    /// primary is the only reference used.
     static func cursorInGlobalTopLeftCoordinates() -> CGPoint? {
         let mouseLocation = NSEvent.mouseLocation
         // Both spaces share the primary display's corner as their origin;

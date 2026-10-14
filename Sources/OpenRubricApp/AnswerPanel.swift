@@ -95,7 +95,7 @@ final class AnswerPanel {
     func show(_ answer: ParsedAnswer, nearCursor cursor: CGPoint) {
         if answer.isMultipleChoice, let letter = answer.letter {
             letterLabel.stringValue = letter
-            answerLabel.stringValue = answer.text == letter ? "Doğru cevap" : answer.text
+            answerLabel.stringValue = answer.text == letter ? "Correct answer" : answer.text
             letterLabel.isHidden = false
         } else {
             letterLabel.isHidden = true
