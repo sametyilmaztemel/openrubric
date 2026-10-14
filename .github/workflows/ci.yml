@@ -1,0 +1,19 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: swift test + build (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode / Swift version
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Run tests (OpenRubricCore)
+        run: swift test --parallel
