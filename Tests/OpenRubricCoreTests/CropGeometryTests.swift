@@ -109,7 +109,15 @@ struct CropSamplingTests {
         // origin-offset bug — a wrong translation runs the region off
         // the image; this guards against a shift that stays in bounds.)
         guard let data = cropped!.dataProvider?.data else { return }
+        #if canImport(CoreGraphics)
+        // Darwin (real CoreGraphics): CGDataProvider.data is the CFData
+        // reference directly.
+        let cfData = data
+        #else
+        // swift-corelibs-foundation (Linux): the provider's `data` is an
+        // opaque CFTypeRef pointer — bridge it to CFData.
         let cfData = Unmanaged<CFData>.fromOpaque(data).takeUnretainedValue()
+        #endif
         let length = CFDataGetLength(cfData)
         var buf = [UInt8](repeating: 0, count: length)
         buf.withUnsafeMutableBytes { raw in
