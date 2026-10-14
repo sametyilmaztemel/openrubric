@@ -112,11 +112,15 @@ struct CropSamplingTests {
         let cfData = Unmanaged<CFData>.fromOpaque(data).takeUnretainedValue()
         let length = CFDataGetLength(cfData)
         var buf = [UInt8](repeating: 0, count: length)
-        CFDataGetBytes(cfData, CFRange(location: 0, length: length), &buf)
+        buf.withUnsafeMutableBytes { raw in
+            CFDataGetBytes(cfData, CFRange(location: 0, length: length), raw.bindMemory(to: UInt8.self).baseAddress)
+        }
         let row = cropped!.bytesPerRow
         let cx = cropped!.width / 2, cy = cropped!.height / 2
         let idx = cy * row + cx * 4
-        #expect(buf[idx] == 255, buf[idx + 1] == 0, buf[idx + 2] == 0)
+        #expect(buf[idx] == 255)
+        #expect(buf[idx + 1] == 0)
+        #expect(buf[idx + 2] == 0)
     }
 }
 #endif
