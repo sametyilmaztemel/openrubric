@@ -125,8 +125,8 @@ final class SettingsWindowController: NSWindowController {
     /// defaults so a half-typed Anthropic key doesn't silently point at
     /// an OpenAI-shaped endpoint.
     @objc private func providerChanged() {
-        guard let index = providerPicker.indexOfSelectedItem,
-              let provider = ApiProvider.allCases[safe: index] else { return }
+        let index = providerPicker.indexOfSelectedItem
+        guard let provider = ApiProvider.allCases[safe: index] else { return }
         baseURLField.stringValue = OpenRubricSettings.defaultBaseURL(for: provider)
         modelField.stringValue = OpenRubricSettings.defaultModel(for: provider)
     }

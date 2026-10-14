@@ -100,7 +100,7 @@ final class AppModel {
 
 extension AppModel {
     /// The cursor as a point in **global top-left display coordinates**
-    /// (the space `SCShareableDisplay.frame` and `CropGeometry` use).
+    /// (the space `SCDisplay.frame` and `CropGeometry` use).
     ///
     /// `NSEvent.mouseLocation` is in AppKit's bottom-left global space;
     /// the two spaces share the primary display's corner as their origin

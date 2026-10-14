@@ -19,9 +19,9 @@ final class HotkeyManager: @unchecked Sendable {
 
     /// Default: ⌃⌥⌘A.
     static let defaultKeyCode: UInt32 = UInt32(kVK_ANSI_A)
-    static let defaultModifiers: UInt32 = UInt32(controlKey | optionKey | commandKey)
+    static let defaultModifiers: UInt32 = UInt32(controlKey | optionKey | cmdKey)
 
-    func start(keyCode: UInt32 = Self.defaultKeyCode, modifiers: UInt32 = Self.defaultModifiers) {
+    func start(keyCode: UInt32 = defaultKeyCode, modifiers: UInt32 = defaultModifiers) {
         stop()
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))

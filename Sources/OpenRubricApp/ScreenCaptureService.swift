@@ -11,7 +11,7 @@ import OpenRubricCore
 /// native pixel resolution -> `CropGeometry.cropped` -> PNG data ready
 /// for the vision call.
 ///
-/// Coordinate spaces: `SCShareableDisplay.frame` is in screen POINTS
+/// Coordinate spaces: `SCDisplay.frame` is in screen POINTS
 /// with a top-left origin (y grows downward) — the same space the
 /// global top-left cursor point arrives in. The captured image is in
 /// PIXELS; `CropGeometry.cropped` maps points->pixels per display.
@@ -34,16 +34,17 @@ final class ScreenCaptureService: @unchecked Sendable {
         }
 
         let configuration = SCStreamConfiguration()
-        // Whole display at native pixel size (Apple's SCK sample uses
-        // width/height * pixelScale); the crop-to-pixel mapping happens
-        // in CropGeometry.cropped.
-        let scale = display.pixelScale
-        configuration.width = Int(display.frame.width * scale)
-        configuration.height = Int(display.frame.height * scale)
+        // Whole display at its native pixel size. `CGDisplayPixelsWide/High`
+        // read the exact pixel count from the display's CoreGraphics id —
+        // authoritative, no scale-factor math or rounding. The crop is
+        // then mapped points->pixels in CropGeometry.cropped (which derives
+        // the per-pixel scale from the returned image itself).
+        configuration.width = CGDisplayPixelsWide(display.displayID)
+        configuration.height = CGDisplayPixelsHigh(display.displayID)
         configuration.showsCursor = false
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
 
         guard let cropped = CropGeometry.cropped(image, crop: crop) else {
@@ -58,7 +59,7 @@ final class ScreenCaptureService: @unchecked Sendable {
     /// The display whose frame contains the cursor. Falls back to the
     /// main display (frame origin .zero in screen coordinates), then to
     /// the largest display, so an off-screen cursor never kills capture.
-    private func display(containing cursor: CGPoint, in displays: [SCShareableDisplay]) -> SCShareableDisplay? {
+    private func display(containing cursor: CGPoint, in displays: [SCDisplay]) -> SCDisplay? {
         guard !displays.isEmpty else { return nil }
         for display in displays where display.frame.contains(cursor) {
             return display
