@@ -8,11 +8,11 @@ import Testing
 /// Records the last request so tests can assert on the wire format.
 final class AnthropicStubProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
-    static var lastRequest: URLRequest? {
-        get { lock.lock(); defer { lock.unlock() }; return _last }
-        set { lock.lock(); defer { lock.unlock() }; _last = newValue }
+    static var requests: [URLRequest] {
+        get { lock.lock(); defer { lock.unlock() }; return _requests }
+        set { lock.lock(); defer { lock.unlock() }; _requests = newValue }
     }
-    private nonisolated(unsafe) static var _last: URLRequest?
+    private nonisolated(unsafe) static var _requests: [URLRequest] = []
 
     /// ?stubStatus=NNN  -> respond with that status
     /// ?stubRawBody=... -> respond with that body
@@ -20,7 +20,7 @@ final class AnthropicStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        AnthropicStubProtocol.lastRequest = request
+        AnthropicStubProtocol.requests = AnthropicStubProtocol.requests + [request]
         var query: [String: String] = [:]
         if let url = request.url,
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
@@ -84,7 +84,8 @@ struct AnthropicClientTests {
         let raw = try await client.completion(systemPrompt: "sys", userPrompt: "user", imagePNG: png)
         #expect(raw.contains("ANSWER: B"))
 
-        let request = AnthropicStubProtocol.lastRequest
+        let request = AnthropicStubProtocol.requests
+            .last { $0.url?.absoluteString == client.url.absoluteString }
         #expect(request?.value(forHTTPHeaderField: "x-api-key") == "sk-ant-test")
         #expect(request?.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
         #expect(request?.value(forHTTPHeaderField: "Authorization") == nil)

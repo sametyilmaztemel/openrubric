@@ -13,24 +13,24 @@ import Testing
 final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
 
-    static var lastRequest: URLRequest? {
-        get { lock.lock(); defer { lock.unlock() }; return _lastRequest }
-        set { lock.lock(); defer { lock.unlock() }; _lastRequest = newValue }
+    static var requests: [URLRequest] {
+        get { lock.lock(); defer { lock.unlock() }; return _requests }
+        set { lock.lock(); defer { lock.unlock() }; _requests = newValue }
     }
-    static var lastBody: [String: Any]? {
-        get { lock.lock(); defer { lock.unlock() }; return _lastBody }
-        set { lock.lock(); defer { lock.unlock() }; _lastBody = newValue }
+    static var bodies: [[String: Any]] {
+        get { lock.lock(); defer { lock.unlock() }; return _bodies }
+        set { lock.lock(); defer { lock.unlock() }; _bodies = newValue }
     }
-    private nonisolated(unsafe) static var _lastRequest: URLRequest?
-    private nonisolated(unsafe) static var _lastBody: [String: Any]?
+    private nonisolated(unsafe) static var _requests: [URLRequest] = []
+    private nonisolated(unsafe) static var _bodies: [[String: Any]] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        StubURLProtocol.lastRequest = request
+        StubURLProtocol.requests = StubURLProtocol.requests + [request]
         if let data = request.httpBody {
-            StubURLProtocol.lastBody = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            StubURLProtocol.bodies = StubURLProtocol.bodies + [(try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]]
         }
         let query = stubQuery(from: request.url)
         let status = (query["stubStatus"]).flatMap(Int.init) ?? 200
@@ -103,8 +103,11 @@ struct ClientTests {
             imagePNG: png
         )
         #expect(raw.contains("ANSWER: B"))
-        #expect(StubURLProtocol.lastRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer sk-test")
-        let body = StubURLProtocol.lastBody
+        let idx = StubURLProtocol.requests
+            .firstIndex { $0.url?.absoluteString == client.url.absoluteString }
+        let request = idx.map { StubURLProtocol.requests[$0] }
+        let body = idx.map { StubURLProtocol.bodies[$0] }
+        #expect(request?.value(forHTTPHeaderField: "Authorization") == "Bearer sk-test")
         #expect(body?["model"] as? String == "gpt-4o-mini")
         let messages = body?["messages"] as? [[String: Any]]
         #expect(messages?.count == 2)
