@@ -24,14 +24,31 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     private nonisolated(unsafe) static var _requests: [URLRequest] = []
     private nonisolated(unsafe) static var _bodies: [[String: Any]] = []
 
+    /// On Darwin, `URLSession` hands the body over as a stream and leaves
+    /// `httpBody` nil; on Linux the reverse is true. Read whichever is set.
+    static func bodyData(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buffer, maxLength: buffer.count)
+            if n <= 0 { break }
+            data.append(contentsOf: buffer[0..<n])
+        }
+        return data
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         StubURLProtocol.requests = StubURLProtocol.requests + [request]
-        if let data = request.httpBody {
-            StubURLProtocol.bodies = StubURLProtocol.bodies + [(try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]]
-        }
+        let bodyData = Self.bodyData(of: request)
+        StubURLProtocol.bodies = StubURLProtocol.bodies
+            + [(try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] ?? [:]]
         let query = stubQuery(from: request.url)
         let status = (query["stubStatus"]).flatMap(Int.init) ?? 200
         let body: String

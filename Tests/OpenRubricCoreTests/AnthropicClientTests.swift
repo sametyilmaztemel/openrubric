@@ -8,11 +8,32 @@ import Testing
 /// Records the last request so tests can assert on the wire format.
 final class AnthropicStubProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
-    static var requests: [URLRequest] {
-        get { lock.lock(); defer { lock.unlock() }; return _requests }
-        set { lock.lock(); defer { lock.unlock() }; _requests = newValue }
+    struct Recorded: Sendable {
+        let request: URLRequest
+        let body: Data
     }
-    private nonisolated(unsafe) static var _requests: [URLRequest] = []
+    static var recorded: [Recorded] {
+        get { lock.lock(); defer { lock.unlock() }; return _recorded }
+        set { lock.lock(); defer { lock.unlock() }; _recorded = newValue }
+    }
+    private nonisolated(unsafe) static var _recorded: [Recorded] = []
+
+    /// On Darwin, `URLSession` hands the body over as a stream and leaves
+    /// `httpBody` nil; on Linux the reverse is true. Read whichever is set.
+    static func bodyData(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buffer, maxLength: buffer.count)
+            if n <= 0 { break }
+            data.append(contentsOf: buffer[0..<n])
+        }
+        return data
+    }
 
     /// ?stubStatus=NNN  -> respond with that status
     /// ?stubRawBody=... -> respond with that body
@@ -20,7 +41,9 @@ final class AnthropicStubProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        AnthropicStubProtocol.requests = AnthropicStubProtocol.requests + [request]
+                let bodyData = Self.bodyData(of: request)
+        AnthropicStubProtocol.recorded = AnthropicStubProtocol.recorded
+            + [Recorded(request: request, body: bodyData)]
         var query: [String: String] = [:]
         if let url = request.url,
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
@@ -84,16 +107,18 @@ struct AnthropicClientTests {
         let raw = try await client.completion(systemPrompt: "sys", userPrompt: "user", imagePNG: png)
         #expect(raw.contains("ANSWER: B"))
 
-        let request = AnthropicStubProtocol.requests
-            .last { $0.url?.absoluteString == client.url.absoluteString }
+        let idx = AnthropicStubProtocol.recorded
+            .lastIndex { $0.request.url?.absoluteString == client.url.absoluteString }
+        let request = idx.map { AnthropicStubProtocol.recorded[$0].request }
+        let data = idx.map { AnthropicStubProtocol.recorded[$0].body }
         #expect(request?.value(forHTTPHeaderField: "x-api-key") == "sk-ant-test")
         #expect(request?.value(forHTTPHeaderField: "anthropic-version") == "2023-06-01")
         #expect(request?.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(request?.url?.absoluteString.contains("/v1/messages") == true)
 
         // The image must be a base64 content block, system a top-level field.
-        let data = request?.httpBody!
-        let body = (try? JSONSerialization.jsonObject(with: data!)) as? [String: Any]
+
+        let body = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         #expect(body?["system"] as? String == "sys")
         #expect(body?["max_tokens"] as? Int == 300)
         let messages = body?["messages"] as? [[String: Any]]
