@@ -81,5 +81,42 @@ struct CropSamplingTests {
         #expect(cropped!.width == 1040)
         #expect(cropped!.height == 1040)
     }
+
+    @Test("a crop on a secondary display (non-zero origin) samples the right pixels")
+    func secondaryDisplayOriginOffset() {
+        // A secondary display placed to the right of a primary one:
+        // its global origin is (1512, 0) in top-left screen coordinates.
+        let secondary = DisplayRect(origin: CGPoint(x: 1512, y: 0),
+                                    size: CGSize(width: 1512, height: 982))
+        // A solid-color image covering ONLY the secondary display at 1x.
+        let image = makeImage(width: 1512, height: 982)
+
+        // Cursor near the LEFT edge of the secondary display: a global
+        // crop straddling the display's left border must be clamped to
+        // the display and must sample the image's left edge (x=0..),
+        // not the region offset by the display's global origin.
+        let cursor = CGPoint(x: 1512 + 60, y: 491)
+        let crop = CropGeometry.crop(cursor: cursor, radius: 260, display: secondary)!
+        let cropped = CropGeometry.cropped(image, crop: crop)
+        #expect(cropped != nil)
+        // Clamped to the display edge: width = (1512-60+260... no, the
+        // clamp slides the crop fully inside => full 520 pt side.
+        #expect(cropped!.width == 520)
+        #expect(cropped!.height == 520)
+
+        // Sample a pixel at the crop's center: it must equal the solid
+        // fill color. (The nil/size assertions above already catch the
+        // origin-offset bug — a wrong translation runs the region off
+        // the image; this guards against a shift that stays in bounds.)
+        guard let data = cropped!.dataProvider?.data else { return }
+        let cfData = Unmanaged<CFData>.fromOpaque(data).takeUnretainedValue()
+        let length = CFDataGetLength(cfData)
+        var buf = [UInt8](repeating: 0, count: length)
+        CFDataGetBytes(cfData, CFRange(location: 0, length: length), &buf)
+        let row = cropped!.bytesPerRow
+        let cx = cropped!.width / 2, cy = cropped!.height / 2
+        let idx = cy * row + cx * 4
+        #expect(buf[idx] == 255, buf[idx + 1] == 0, buf[idx + 2] == 0)
+    }
 }
 #endif
