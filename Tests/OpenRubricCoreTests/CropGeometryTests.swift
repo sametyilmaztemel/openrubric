@@ -82,6 +82,25 @@ struct CropSamplingTests {
         #expect(cropped!.height == 1040)
     }
 
+    /// Draws the crop into a known RGBA8 bitmap context and reads one
+    /// pixel. Sampling through an explicit context is far more reliable
+    /// than parsing `dataProvider`'s raw bytes, whose byte order and
+    /// layout are not guaranteed after a `cropping(to:)` (on Darwin the
+    /// provider can come back in a different order than the 8-bit
+    /// `premultipliedLast` context we built the source in).
+    private func samplePixel(_ image: CGImage, x: Int, y: Int) -> [UInt8] {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8,
+            bytesPerRow: 4, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        ctx.draw(image, in: CGRect(x: -x, y: -y, width: image.width, height: image.height))
+        guard let buf = ctx.data else { return [0, 0, 0, 0] }
+        let base = buf.assumingMemoryBound(to: UInt8.self)
+        return [base[0], base[1], base[2], base[3]]
+    }
+
     @Test("a crop on a secondary display (non-zero origin) samples the right pixels")
     func secondaryDisplayOriginOffset() {
         // A secondary display placed to the right of a primary one:
@@ -108,27 +127,16 @@ struct CropSamplingTests {
         // fill color. (The nil/size assertions above already catch the
         // origin-offset bug — a wrong translation runs the region off
         // the image; this guards against a shift that stays in bounds.)
-        guard let data = cropped!.dataProvider?.data else { return }
-        #if canImport(CoreGraphics)
-        // Darwin (real CoreGraphics): CGDataProvider.data is the CFData
-        // reference directly.
-        let cfData = data
-        #else
-        // swift-corelibs-foundation (Linux): the provider's `data` is an
-        // opaque CFTypeRef pointer — bridge it to CFData.
-        let cfData = Unmanaged<CFData>.fromOpaque(data).takeUnretainedValue()
-        #endif
-        let length = CFDataGetLength(cfData)
-        var buf = [UInt8](repeating: 0, count: length)
-        buf.withUnsafeMutableBytes { raw in
-            CFDataGetBytes(cfData, CFRange(location: 0, length: length), raw.bindMemory(to: UInt8.self).baseAddress)
-        }
-        let row = cropped!.bytesPerRow
-        let cx = cropped!.width / 2, cy = cropped!.height / 2
-        let idx = cy * row + cx * 4
-        #expect(buf[idx] == 255)
-        #expect(buf[idx + 1] == 0)
-        #expect(buf[idx + 2] == 0)
+        let pixel = samplePixel(
+            cropped!, x: cropped!.width / 2, y: cropped!.height / 2
+        )
+        // The 1x1 context above is 8-bit premultipliedLast, so the byte
+        // order is exactly RGBA: solid red at full alpha reads as
+        // (255, 0, 0, 255).
+        #expect(pixel[0] == 255)
+        #expect(pixel[1] == 0)
+        #expect(pixel[2] == 0)
+        #expect(pixel[3] == 255)
     }
 }
 #endif
