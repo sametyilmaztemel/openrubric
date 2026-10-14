@@ -27,13 +27,13 @@ final class AppSettingsStore: @unchecked Sendable {
     private(set) var settings: OpenRubricSettings
 
     /// The stored API key; `nil` when the user has not set one.
-    var apiKey: String {
+    var apiKey: String? {
         KeychainStore.load()
     }
 
     /// Applies a new settings value and persists both halves
     /// (UserDefaults + Keychain).
-    func apply(_ new: OpenRubricSettings, apiKey: String throws {
+    func apply(_ new: OpenRubricSettings, apiKey: String?) throws {
         settings = new
         let data = try JSONEncoder().encode(new)
         defaults.set(data, forKey: Self.defaultsKey)
@@ -42,7 +42,7 @@ final class AppSettingsStore: @unchecked Sendable {
 
     /// Sets only the key (Settings window "Save" when other fields were
     /// unchanged) - still goes through the same Keychain path.
-    func apply(key apiKey: String throws {
+    func apply(key apiKey: String?) throws {
         try KeychainStore.save(apiKey ?? "")
     }
 }
