@@ -66,7 +66,13 @@ struct CropSamplingTests {
                             bitsPerComponent: 8, bytesPerRow: width * 4,
                             space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         // Fill with a solid color so we can assert non-null output.
-        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        // The color is defined in the SAME device-RGB space as the
+        // context (components [1,0,0,1]), so no color-space conversion
+        // runs at fill time — on a headless CI runner a CGColor made in
+        // the default (sRGB) space converts to ~(255, 38, 0) in device
+        // space, which would corrupt the red-channel assertion.
+        let red = CGColor(colorSpace: cs, components: [1, 0, 0, 1])!
+        ctx.setFillColor(red)
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return ctx.makeImage()!
     }
