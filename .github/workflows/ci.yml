@@ -17,3 +17,5 @@ jobs:
           swift --version
       - name: Run tests (OpenRubricCore)
         run: swift test --parallel
+      - name: Build menu bar app (OpenRubric)
+        run: swift build --product OpenRubric
