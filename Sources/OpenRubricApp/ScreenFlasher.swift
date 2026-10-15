@@ -27,16 +27,22 @@ final class ScreenFlasher: @unchecked Sendable {
     /// `CGDisplaySetDisplayBrightness(display, level)`, if the symbol resolved.
     private let setBrightness: ((CGDirectDisplayID, CGFloat) -> Void)?
 
+    /// `RTLD_DEFAULT` is `((void *) -2)` on Darwin. Built directly from the
+    /// numeric value so this file does not rely on the `RTLD_DEFAULT`
+    /// constant being visible in the Darwin module (it is not, in this
+    /// target's build), while `dlsym` itself resolves without issue.
+    private static let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)!
+
     init(pulseGap: Double = 0.25, dimFraction: Double = 0.15) {
         self.pulseGap = pulseGap
         self.dimFraction = dimFraction
 
         var getter: ((CGDirectDisplayID) -> CGFloat)?
         var setter: ((CGDirectDisplayID, CGFloat) -> Void)?
-        if let sym = dlsym(RTLD_DEFAULT, "CGDisplayBrightness") {
+        if let sym = dlsym(Self.rtldDefault, "CGDisplayBrightness") {
             getter = unsafeBitCast(sym, to: ((CGDirectDisplayID) -> CGFloat).self)
         }
-        if let sym = dlsym(RTLD_DEFAULT, "CGDisplaySetDisplayBrightness") {
+        if let sym = dlsym(Self.rtldDefault, "CGDisplaySetDisplayBrightness") {
             setter = unsafeBitCast(sym, to: ((CGDirectDisplayID, CGFloat) -> Void).self)
         }
         self.getBrightness = getter
