@@ -117,12 +117,27 @@ final class KeyboardFlasher: @unchecked Sendable {
 
         // Read the current level so it can be restored after the pulse.
         // The placeholder value is bound to a local so ARC keeps it alive
-        // across the read, exactly as in the reference implementation.
+        // across the read. IOHIDDeviceGetValue fills the out-param with the
+        // element's current value, but the public header does not state
+        // whether it writes a new retained (+1) object or reuses the pointer
+        // we passed. To be safe under both interpretations we compare the
+        // pointer after the call: if it differs from our placeholder, the
+        // call handed us a new reference we must release; if it is the same,
+        // ARC already owns the placeholder and releasing it would be a
+        // double-free.
         let placeholderValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 0)
         var placeholder = Unmanaged.passUnretained(placeholderValue)
         let got = IOHIDDeviceGetValue(keyboard, element, &placeholder)
         guard got == kIOReturnSuccess else { return }
-        let original = Int(IOHIDValueGetIntegerValue(placeholder.takeUnretainedValue()))
+        let returned = placeholder.takeUnretainedValue()
+        let original = Int(IOHIDValueGetIntegerValue(returned))
+        if Unmanaged.passUnretained(returned).toOpaque() != Unmanaged.passUnretained(placeholderValue).toOpaque() {
+            // GetValue installed a different, caller-owned value: take
+            // ownership (balanced +1/-1) and release it now that the
+            // integer has been read. If it reused our placeholder instead,
+            // ARC owns that object and we must not release it here.
+            Unmanaged.passUnretained(returned).release()
+        }
 
         for _ in 0..<count {
             setElement(keyboard: keyboard, element: element, value: 0)

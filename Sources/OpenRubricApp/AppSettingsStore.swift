@@ -6,22 +6,62 @@ import OpenRubricCore
 /// base URL, model, prompt mode, crop radius, and flash channels are ever
 /// written.
 ///
-/// The defaults key is versioned (`settings.v1` -> `settings.v2`): a
-/// settings schema change that adds a field migrates by falling back to
-/// defaults once, so a new field never breaks decode of old payloads.
+/// The defaults key is versioned (`settings.v1` -> `settings.v2`). On the
+/// first launch after a schema bump the store reads the previous key,
+/// migrates the user's values under the new key (new fields take their
+/// defaults), so an upgrade never silently resets the configuration.
 final class AppSettingsStore: @unchecked Sendable {
     private let defaults: UserDefaults
 
     private static let defaultsKey = "settings.v2"
+    private static let legacyKey = "settings.v1"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        if let data = defaults.data(forKey: Self.defaultsKey),
+        self.settings = Self.load(from: defaults)
+    }
+
+    private static func load(from defaults: UserDefaults) -> OpenRubricSettings {
+        if let data = defaults.data(forKey: defaultsKey),
            let decoded = try? JSONDecoder().decode(OpenRubricSettings.self, from: data) {
-            self.settings = decoded
-        } else {
-            self.settings = OpenRubricSettings()
+            return decoded
         }
+        // One-time migration from the previous schema.
+        if let legacy = defaults.data(forKey: legacyKey), let migrated = migrate(legacy: legacy) {
+            if let data = try? JSONEncoder().encode(migrated) {
+                defaults.set(data, forKey: defaultsKey)
+            }
+            return migrated
+        }
+        return OpenRubricSettings()
+    }
+
+    /// Decodes a `settings.v1` payload (no `flashChannels` field) into the
+    /// current struct, letting the new field fall back to its default.
+    private static func migrate(legacy data: Data) -> OpenRubricSettings? {
+        // All-optional mirror of the v1 schema; the payload only needs to
+        // be a JSON object with at least one known field to count as legacy
+        // settings worth preserving.
+        struct Legacy: Decodable {
+            let apiProvider: ApiProvider?
+            let baseURL: String?
+            let model: String?
+            let promptMode: PromptMode?
+            let includeExplanation: Bool?
+            let cropRadius: CGFloat?
+        }
+        guard let old = try? JSONDecoder().decode(Legacy.self, from: data) else { return nil }
+        guard old.apiProvider != nil || old.baseURL != nil || old.model != nil
+                || old.promptMode != nil || old.includeExplanation != nil
+                || old.cropRadius != nil else { return nil }
+        return OpenRubricSettings(
+            apiProvider: old.apiProvider ?? .anthropic,
+            baseURL: old.baseURL,
+            model: old.model,
+            promptMode: old.promptMode ?? .multipleChoice,
+            includeExplanation: old.includeExplanation ?? true,
+            cropRadius: old.cropRadius ?? 260
+        )
     }
 
     private(set) var settings: OpenRubricSettings
