@@ -38,10 +38,16 @@ final class KeyboardFlasher: @unchecked Sendable {
     }
 
     /// Blinks the Caps Lock LED `count` times (A=1 ...).
+    ///
+    /// The LED is an on/off element, so "blink N times" is a pulse loop
+    /// (on -> off -> on -> off ...), not a single value write: a one-shot
+    /// write of the count clamps to the element's max of 1 and leaves the
+    /// LED lit instead of flashing. The resting state is read first and
+    /// restored afterwards, so a cycle never leaves Caps Lock on.
     func flashCapsLock(count: Int) {
         queue.async {
             for keyboard in Self.keyboards() {
-                Self.writeCapsLock(keyboard: keyboard, count: count)
+                Self.blinkCapsLock(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
         }
     }
@@ -72,26 +78,46 @@ final class KeyboardFlasher: @unchecked Sendable {
         return (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>)?.map { $0 } ?? []
     }
 
-    /// Blinks every Caps Lock LED element on `keyboard` to `count`.
+    /// Blinks every Caps Lock LED element on `keyboard` `count` times by
+    /// pulsing each on/off cycle, then restores the resting state.
     ///
-    /// A Caps Lock LED is normally an Output element on the LEDs page; some
-    /// keyboards expose it as a Feature. Matching on page+usage returns every
-    /// such element regardless of type, and writing the value to each is the
-    /// same thing a working reference implementation does, so no type filter
-    /// is needed.
-    ///
-    /// The count is clamped to the element's reported maximum
-    /// (`IOHIDElementGetLogicalMax`) before the write: a Z (26) answer
-    /// would otherwise be out of range for driver stacks that reject
-    /// writes above the element's max, so clamping preserves the blink intent
-    /// without an out-of-range write.
-    private static func writeCapsLock(keyboard: IOHIDDevice, count: Int) {
+    /// A Caps Lock LED is an on/off element, so "blink N times" is a pulse
+    /// loop, not a single value write (a one-shot write of the count clamps
+    /// to the element's max of 1 and leaves the LED lit instead of
+    /// flashing). Each cycle writes the *inverse* of the resting state and
+    /// back to it, so a blink is visible whether the LED starts on or off,
+    /// and the loop ends at the resting state (a cycle never toggles Caps
+    /// Lock on).
+    private static func blinkCapsLock(keyboard: IOHIDDevice, count: Int, gap: Double) {
         let elements = matchingElements(on: keyboard, page: kHIDPage_LEDs, usage: kHIDUsage_LED_CapsLock)
+        guard !elements.isEmpty else { return }
         for element in elements {
-            let maxValue = Int(IOHIDElementGetLogicalMax(element))
-            let clamped = FlashMath.clampedBlinkCount(count, maxValue: maxValue)
-            setElement(keyboard: keyboard, element: element, value: clamped)
+            let resting = readElement(keyboard: keyboard, element: element) ?? 0
+            let inverse = resting == 0 ? 1 : 0     // opposite of resting => always a visible change
+            for _ in 0..<count {
+                setElement(keyboard: keyboard, element: element, value: inverse)
+                Thread.sleep(forTimeInterval: gap)
+                setElement(keyboard: keyboard, element: element, value: resting)
+                Thread.sleep(forTimeInterval: gap)
+            }
         }
+    }
+
+    /// Reads the current integer value of `element` on `keyboard`, or `nil`
+    /// when the read fails. The placeholder is bound to a local so ARC keeps
+    /// it alive across the call; if `IOHIDDeviceGetValue` installs a new
+    /// caller-owned value (pointer differs from the placeholder) we release
+    /// it after reading the integer.
+    private static func readElement(keyboard: IOHIDDevice, element: IOHIDElement) -> Int? {
+        let placeholderValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 0)
+        var placeholder = Unmanaged.passUnretained(placeholderValue)
+        guard IOHIDDeviceGetValue(keyboard, element, &placeholder) == kIOReturnSuccess else { return nil }
+        let returned = placeholder.takeUnretainedValue()
+        let value = Int(IOHIDValueGetIntegerValue(returned))
+        if Unmanaged.passUnretained(returned).toOpaque() != Unmanaged.passUnretained(placeholderValue).toOpaque() {
+            Unmanaged.passUnretained(returned).release()
+        }
+        return value
     }
 
     /// Pulses the keyboard backlight, `count` times, restoring the original
@@ -120,29 +146,9 @@ final class KeyboardFlasher: @unchecked Sendable {
         guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
               let element = found[index].first else { return }
 
-        // Read the current level so it can be restored after the pulse.
-        // The placeholder value is bound to a local so ARC keeps it alive
-        // across the read. IOHIDDeviceGetValue fills the out-param with the
-        // element's current value, but the public header does not state
-        // whether it writes a new retained (+1) object or reuses the pointer
-        // we passed. To be safe under both interpretations we compare the
-        // pointer after the call: if it differs from our placeholder, the
-        // call handed us a new reference we must release; if it is the same,
-        // ARC already owns the placeholder and releasing it would be a
-        // double-free.
-        let placeholderValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 0)
-        var placeholder = Unmanaged.passUnretained(placeholderValue)
-        let got = IOHIDDeviceGetValue(keyboard, element, &placeholder)
-        guard got == kIOReturnSuccess else { return }
-        let returned = placeholder.takeUnretainedValue()
-        let original = Int(IOHIDValueGetIntegerValue(returned))
-        if Unmanaged.passUnretained(returned).toOpaque() != Unmanaged.passUnretained(placeholderValue).toOpaque() {
-            // GetValue installed a different, caller-owned value: take
-            // ownership (balanced +1/-1) and release it now that the
-            // integer has been read. If it reused our placeholder instead,
-            // ARC owns that object and we must not release it here.
-            Unmanaged.passUnretained(returned).release()
-        }
+        // Read the current level so it can be restored after the pulse; a
+        // failed read means we cannot restore, so skip (best-effort channel).
+        guard let original = readElement(keyboard: keyboard, element: element) else { return }
 
         let maxValue = Int(IOHIDElementGetLogicalMax(element))
         let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)

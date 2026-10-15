@@ -37,6 +37,10 @@ final class MenuBarController: NSObject {
         dismiss.target = self
         menu.addItem(dismiss)
         menu.addItem(.separator())
+        let help = NSMenuItem(title: "How to use…", action: #selector(showHelp), keyEquivalent: "?")
+        help.keyEquivalentModifierMask = [.command]
+        help.target = self
+        menu.addItem(help)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -95,6 +99,42 @@ final class MenuBarController: NSObject {
             historyWindowController = HistoryWindowController(store: history)
         }
         historyWindowController?.showWindow(nil)
+    }
+
+    /// A short in-app guide. The most common mistake is the crop: the app
+    /// captures a square centred on the mouse pointer, so the pointer must be
+    /// sitting on the question — not on a nearby icon or the menu bar.
+    @objc private func showHelp() {
+        let alert = NSAlert()
+        alert.messageText = "How OpenRubric works"
+        alert.informativeText = """
+        1. Point the mouse at the question. The app captures a square centred \
+        on your cursor (Settings → Crop radius controls its size) and sends \
+        only that region to the model. If the text or the answer choices are \
+        not inside that square, the model can't see them — so place the cursor \
+        in the middle of the question.
+
+        2. Check the frame first: press Control+Option+Command+P to open a \
+        preview of exactly what the model will see. If the question or the \
+        choices are cut off, move the cursor (or raise the crop radius in \
+        Settings) until the whole question fits, then close the preview.
+
+        3. Ask it: press Control+Option+Command+A anywhere, or choose \
+        "Answer Question Now" from this menu.
+
+        4. Read the answer in the small panel near the cursor. Press the \
+        answer hotkey again (or "Dismiss Answer") to clear it and ask the next \
+        one.
+
+        Discreet signals (multiple choice only): when the answer is a letter, \
+        the enabled channels fire — the Caps Lock LED blinks A=1, B=2, … and \
+        the keyboard backlight / screen brightness pulse. Enable them in \
+        Settings → Discreet output. Backlight and screen are best-effort: some \
+        keyboards and external displays don't expose a controllable element, \
+        in which case the panel is the reliable channel.
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func quit() {
