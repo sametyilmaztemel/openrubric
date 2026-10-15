@@ -25,6 +25,7 @@ final class AppModel {
     private let panel: AnswerPanel
     private let hotkey: HotkeyManager
     private let flash: FlashCoordinator
+    private let history: HistoryStore
 
     private(set) var phase: Phase = .idle
     private var inFlight: Task<Void, Never>?
@@ -33,11 +34,21 @@ final class AppModel {
     var onPhaseChange: (@MainActor (Phase) -> Void)?
 
     init(store: AppSettingsStore, panel: AnswerPanel, hotkey: HotkeyManager,
-         flash: FlashCoordinator = FlashCoordinator()) {
+         flash: FlashCoordinator = FlashCoordinator(),
+         history: HistoryStore? = nil) {
         self.store = store
         self.panel = panel
         self.hotkey = hotkey
         self.flash = flash
+        if let history {
+            self.history = history
+        } else {
+            // Default: Application Support/<bundle>/history.jsonl
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("OpenRubric", isDirectory: true)
+                ?? FileManager.default.temporaryDirectory
+            self.history = HistoryStore(fileURL: dir.appendingPathComponent("history.jsonl"))
+        }
     }
 
     func startHotkey() {
@@ -74,13 +85,14 @@ final class AppModel {
                 setPhase(.asking)
 
                 let client = try settings.makeClient(apiKey: key)
-                let raw = try await client.completion(
+                let result = try await client.completion(
                     systemPrompt: PromptBuilder.systemPrompt(mode: settings.promptMode, includeExplanation: settings.includeExplanation),
                     userPrompt: PromptBuilder.userPrompt(mode: settings.promptMode, includeExplanation: settings.includeExplanation),
                     imagePNG: png
                 )
-                let parsed = AnswerParser.parse(raw, mode: .init(promptMode: settings.promptMode))
+                let parsed = AnswerParser.parse(result.text, mode: .init(promptMode: settings.promptMode))
                 panel.show(parsed, nearCursor: cursor)
+                recordHistory(result: result, parsed: parsed, model: settings.model)
                 if let plan = FlashPlanner.plan(for: parsed, enabled: settings.flashChannels) {
                     flash.flash(plan)
                 }
@@ -96,6 +108,28 @@ final class AppModel {
     func dismissPanel() {
         panel.hide()
         setPhase(.idle)
+    }
+
+    /// Persists the answer, its letter, the model, and the token accounting
+    /// for this turn. The cost is resolved from the model pricing table;
+    /// `nil` when the model is not in the table (no made-up prices). A
+    /// write failure is logged (not thrown) so a full Application Support
+    /// directory never crashes the cycle — but is not silent either.
+    private func recordHistory(result: CompletionResult, parsed: ParsedAnswer, model: String) {
+        let letter = parsed.letter
+        let cost = TokenCostEstimator.pricing(for: model)?.cost(of: result.usage)
+        let entry = HistoryEntry(
+            answer: parsed.text,
+            letter: letter,
+            model: model,
+            usage: result.usage,
+            costUSD: cost
+        )
+        do {
+            try history.record(entry)
+        } catch {
+            NSLog("OpenRubric: failed to record history entry: \(error)")
+        }
     }
 
     private func setPhase(_ new: Phase) {

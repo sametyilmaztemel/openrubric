@@ -13,15 +13,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         let store = AppSettingsStore()
+        let history = HistoryStore(fileURL: Self.defaultHistoryURL())
         let panel = AnswerPanel()
         let hotkey = HotkeyManager()
-        let appModel = AppModel(store: store, panel: panel, hotkey: hotkey)
+        let appModel = AppModel(store: store, panel: panel, hotkey: hotkey, history: history)
         appModel.startHotkey()
 
-        let bar = MenuBarController(model: appModel, store: store)
+        let bar = MenuBarController(model: appModel, store: store, history: history)
 
         model = appModel
         menuBar = bar
+    }
+
+    /// Application Support/OpenRubric/history.jsonl (created on demand).
+    private static func defaultHistoryURL() -> URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("OpenRubric", isDirectory: true)
+            ?? FileManager.default.temporaryDirectory
+        return dir.appendingPathComponent("history.jsonl")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -119,7 +119,8 @@ struct ClientTests {
             userPrompt: "user",
             imagePNG: png
         )
-        #expect(raw.contains("ANSWER: B"))
+        #expect(raw.text.contains("ANSWER: B"))
+        #expect(raw.usage == nil)   // default stub body has no usage block
         let idx = StubURLProtocol.requests
             .firstIndex { $0.url?.absoluteString == client.url.absoluteString }
         let request = idx.map { StubURLProtocol.requests[$0] }
@@ -134,6 +135,16 @@ struct ClientTests {
         let urlDict = imagePart?["image_url"] as? [String: Any]
         let imageURL = (urlDict?["url"] as? String) ?? ""
         #expect(imageURL.hasPrefix("data:image/png;base64,"))
+    }
+
+    @Test("usage: parses prompt_tokens/completion_tokens from the response")
+    func usage() async throws {
+        let rawBody = #"{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ANSWER: B"}}],"usage":{"prompt_tokens":900,"completion_tokens":20}}"#
+        let client = try makeClient(rawBody: rawBody)
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let raw = try await client.completion(systemPrompt: "sys", userPrompt: "user", imagePNG: png)
+        #expect(raw.text.contains("ANSWER: B"))
+        #expect(raw.usage == TokenUsage(inputTokens: 900, outputTokens: 20))
     }
 
     @Test("non-2xx raises Error.http with status and error body")

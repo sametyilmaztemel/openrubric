@@ -9,8 +9,9 @@ import FoundationNetworking
 /// part works.
 public protocol ChatCompletionsClient: Sendable {
     /// Sends one chat completion turn with an image (base64 PNG) and
-    /// returns the assistant message content.
-    func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> String
+    /// returns the assistant message content plus token usage when the
+    /// provider reports it.
+    func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> CompletionResult
 }
 
 /// `URLSession` is immutable here and thread-safe for concurrent requests,
@@ -80,7 +81,7 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
         self.url = resolved
     }
 
-    public func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> String {
+    public func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> CompletionResult {
         let body: [String: Any] = [
             "model": configuration.model,
             "max_tokens": configuration.maxTokens,
@@ -124,6 +125,15 @@ public struct OpenAICompatibleClient: ChatCompletionsClient, @unchecked Sendable
         guard !content.isEmpty else {
             throw Error.emptyContent
         }
-        return content
+        return CompletionResult(text: content, usage: parseUsage(from: json))
+    }
+
+    /// OpenAI-compatible usage block: `prompt_tokens` / `completion_tokens`.
+    private func parseUsage(from json: [String: Any]) -> TokenUsage? {
+        guard let usage = json["usage"] as? [String: Any] else { return nil }
+        let prompt = (usage["prompt_tokens"] as? NSNumber)?.intValue
+        let completion = (usage["completion_tokens"] as? NSNumber)?.intValue
+        guard let prompt, let completion else { return nil }
+        return TokenUsage(inputTokens: prompt, outputTokens: completion)
     }
 }

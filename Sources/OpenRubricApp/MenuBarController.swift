@@ -9,12 +9,15 @@ final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let model: AppModel
     private let store: AppSettingsStore
+    private let history: HistoryStore
     private let phaseMenuItem: NSMenuItem
     private var settingsWindowController: SettingsWindowController?
+    private var historyWindowController: HistoryWindowController?
 
-    init(model: AppModel, store: AppSettingsStore) {
+    init(model: AppModel, store: AppSettingsStore, history: HistoryStore) {
         self.model = model
         self.store = store
+        self.history = history
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         phaseMenuItem = NSMenuItem(title: "Ready (⌃⌥⌘A)", action: nil, keyEquivalent: "")
         super.init()
@@ -37,6 +40,9 @@ final class MenuBarController: NSObject {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        let historyItem = NSMenuItem(title: "History…", action: #selector(openHistory), keyEquivalent: "h")
+        historyItem.target = self
+        menu.addItem(historyItem)
         let quit = NSMenuItem(title: "Quit OpenRubric", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -82,6 +88,13 @@ final class MenuBarController: NSObject {
             settingsWindowController = SettingsWindowController(store: store)
         }
         settingsWindowController?.showWindow(nil)
+    }
+
+    @objc private func openHistory() {
+        if historyWindowController == nil {
+            historyWindowController = HistoryWindowController(store: history)
+        }
+        historyWindowController?.showWindow(nil)
     }
 
     @objc private func quit() {
