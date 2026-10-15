@@ -21,7 +21,7 @@ struct AppSettingsStoreMigrationTests {
         return defaults
     }
 
-    private struct MigrationTestError: Error {
+    private enum MigrationTestError: Error {
         case couldNotCreateSuite
     }
 
