@@ -67,7 +67,6 @@ final class HistoryWindowController: NSWindowController {
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         for col in columns {
             tableView.addTableColumn(col)
-            tableView.headerView?.titleOfTableColumn(col) = col.title
         }
         tableView.dataSource = self
         tableView.delegate = self
