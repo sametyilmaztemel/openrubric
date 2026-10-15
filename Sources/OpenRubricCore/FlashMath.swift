@@ -16,7 +16,7 @@ public enum FlashMath {
     /// The blink count to write to a Caps Lock LED element.
     ///
     /// The answer letter maps to a count (A=1 ... Z=26). A Caps Lock LED
-    /// element reports a small `IOHIDElementGetMaximumValue` (often 0, 1, or
+    /// element reports a small `IOHIDElementGetLogicalMax` (often 0, 1, or
     /// 2), and some driver stacks silently drop writes outside
     /// `0...maximum`. Clamping to the element's maximum (and to 0) keeps the
     /// write in range while preserving the "blink" intent for elements that
