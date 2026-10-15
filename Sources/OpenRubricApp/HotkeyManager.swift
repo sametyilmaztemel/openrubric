@@ -29,7 +29,7 @@ final class HotkeyManager: @unchecked Sendable {
 
     func start(
         keyCode: UInt32 = defaultKeyCode, modifiers: UInt32 = defaultModifiers,
-        previewKeyCode: UInt32 = Self.previewKeyCode, previewModifiers: UInt32 = Self.previewModifiers
+        previewKeyCode: UInt32 = previewKeyCode, previewModifiers: UInt32 = previewModifiers
     ) {
         stop()
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
