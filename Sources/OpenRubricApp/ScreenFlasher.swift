@@ -59,18 +59,19 @@ final class ScreenFlasher: @unchecked Sendable {
     func flash(count: Int) {
         queue.async {
             guard let get = self.getBrightness, let set = self.setBrightness else {
-                NSLog("OpenRubric flash: screen brightness symbols NOT resolved (silent no-op)")
+                FlashDiagnostics.note("flash: screen brightness symbols NOT resolved (silent no-op)")
                 return
             }
             let display = CGMainDisplayID()
             let original = get(display)
-            NSLog("OpenRubric flash: screen count=\(count) brightness=\(original)")
+            FlashDiagnostics.note("flash: screen count=\(count) mainDisplay=\(display) brightness=\(original)")
             guard FlashMath.screenFlashEnabled(original: original) else {
-                NSLog("OpenRubric flash: screen already at 0 (skipped)")
+                FlashDiagnostics.note("flash: screen already at 0 (skipped)")
                 return
             }
 
             let dimmed = FlashMath.screenDimLevel(original: original, dimFraction: self.dimFraction)
+            FlashDiagnostics.note("flash: screen dimming to \(dimmed) and back, \(count) pulse(s)")
             for _ in 0..<count {
                 set(display, dimmed)
                 Thread.sleep(forTimeInterval: self.pulseGap)

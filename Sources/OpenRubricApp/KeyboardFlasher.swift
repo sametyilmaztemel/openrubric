@@ -48,7 +48,7 @@ final class KeyboardFlasher: @unchecked Sendable {
     func flashCapsLock(count: Int) {
         queue.async {
             let keyboards = Self.keyboards()
-            NSLog("OpenRubric flash: capsLock count=\(count) keyboards=\(keyboards.count)")
+            FlashDiagnostics.note("flash: capsLock count=\(count) keyboards=\(keyboards.count)")
             for keyboard in keyboards {
                 Self.blinkCapsLock(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
@@ -59,7 +59,7 @@ final class KeyboardFlasher: @unchecked Sendable {
     func flashBacklight(count: Int) {
         queue.async {
             let keyboards = Self.keyboards()
-            NSLog("OpenRubric flash: backlight count=\(count) keyboards=\(keyboards.count)")
+            FlashDiagnostics.note("flash: backlight count=\(count) keyboards=\(keyboards.count)")
             for keyboard in keyboards {
                 Self.pulseBacklight(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
@@ -78,7 +78,12 @@ final class KeyboardFlasher: @unchecked Sendable {
             kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Keyboard
         ]
         IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
-        _ = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        let openStatus = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        // kIOReturnSuccess (0) means the manager opened for reading *and*
+        // writing. A non-zero return (typically kIOReturnNoAccess when the
+        // Input Monitoring permission is missing) means the devices are
+        // visible but writes below will silently fail — so surface it.
+        FlashDiagnostics.note("flash: IOHIDManagerOpen status=\(openStatus) (0=success/read+write)")
 
         return (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>)?.map { $0 } ?? []
     }
@@ -96,21 +101,28 @@ final class KeyboardFlasher: @unchecked Sendable {
     private static func blinkCapsLock(keyboard: IOHIDDevice, count: Int, gap: Double) {
         let elements = matchingElements(on: keyboard, page: kHIDPage_LEDs, usage: kHIDUsage_LED_CapsLock)
         guard !elements.isEmpty else {
-            NSLog("OpenRubric flash: capsLock element NOT FOUND on keyboard")
+            FlashDiagnostics.note("flash: capsLock element NOT FOUND on this keyboard")
             return
         }
         for element in elements {
             let resting = readElement(keyboard: keyboard, element: element) ?? 0
             let maxValue = Int(IOHIDElementGetLogicalMax(element))
-            NSLog("OpenRubric flash: capsLock element found max=\(maxValue) resting=\(resting)")
+            FlashDiagnostics.note("flash: capsLock element found max=\(maxValue) resting=\(resting)")
             let inverse = FlashMath.clampedBlinkCount(resting == 0 ? 1 : 0, maxValue: maxValue)
             let restore = FlashMath.clampedBlinkCount(resting, maxValue: maxValue)
-            for _ in 0..<count {
-                setElement(keyboard: keyboard, element: element, value: inverse)
+            for cycle in 0..<count {
+                // kIOReturnSuccess (0) on the first write is the confirmation
+                // the device accepted writes; a non-zero code (e.g. no access)
+                // is logged so the cause is visible without `log --private`.
+                let writeStatus = setElement(keyboard: keyboard, element: element, value: inverse)
+                if cycle == 0 {
+                    FlashDiagnostics.note("flash: capsLock first write status=\(writeStatus) (0=success)")
+                }
                 Thread.sleep(forTimeInterval: gap)
-                setElement(keyboard: keyboard, element: element, value: restore)
+                _ = setElement(keyboard: keyboard, element: element, value: restore)
                 Thread.sleep(forTimeInterval: gap)
             }
+            FlashDiagnostics.note("flash: capsLock done — \(count) blink(s) sent")
         }
     }
 
@@ -156,32 +168,36 @@ final class KeyboardFlasher: @unchecked Sendable {
         }
         guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
               let element = found[index].first else {
-            NSLog("OpenRubric flash: backlight element NOT FOUND (candidate counts: \(found.map(\.count)))")
+            FlashDiagnostics.note("flash: backlight element NOT FOUND (candidate counts: \(found.map(\.count)))")
             return
         }
 
         // Read the current level so it can be restored after the pulse; a
         // failed read means we cannot restore, so skip (best-effort channel).
         guard let original = readElement(keyboard: keyboard, element: element) else {
-            NSLog("OpenRubric flash: backlight readElement FAILED")
+            FlashDiagnostics.note("flash: backlight readElement FAILED (cannot restore, skipped)")
             return
         }
 
         let maxValue = Int(IOHIDElementGetLogicalMax(element))
         let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)
-        NSLog("OpenRubric flash: backlight element found max=\(maxValue) original=\(original) pulseLevel=\(pulseLevel)")
+        FlashDiagnostics.note("flash: backlight element found candidate=\(index) max=\(maxValue) original=\(original) pulseLevel=\(pulseLevel)")
         guard FlashMath.backlightPulseVisible(original: original, maxValue: maxValue, pulseLevel: pulseLevel) else {
-            NSLog("OpenRubric flash: backlight pulse not visible (skipped)")
+            FlashDiagnostics.note("flash: backlight pulse not visible (skipped)")
             return
         }
         let levels = FlashMath.backlightPulse(original: original, maxValue: maxValue, pulseLevel: pulseLevel)
 
-        for _ in 0..<count {
-            setElement(keyboard: keyboard, element: element, value: levels.set)
+        for cycle in 0..<count {
+            let writeStatus = setElement(keyboard: keyboard, element: element, value: levels.set)
+            if cycle == 0 {
+                FlashDiagnostics.note("flash: backlight first write status=\(writeStatus) (0=success)")
+            }
             Thread.sleep(forTimeInterval: gap)
-            setElement(keyboard: keyboard, element: element, value: levels.restore)
+            _ = setElement(keyboard: keyboard, element: element, value: levels.restore)
             Thread.sleep(forTimeInterval: gap)
         }
+        FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent")
     }
 
     /// HID elements on `keyboard` with the given page and usage (any type).
@@ -196,10 +212,13 @@ final class KeyboardFlasher: @unchecked Sendable {
         return result ?? []
     }
 
-    /// Writes an integer value to an element on `keyboard`.
-    private static func setElement(keyboard: IOHIDDevice, element: IOHIDElement, value: Int) {
+    /// Writes an integer value to an element on `keyboard` and returns the
+    /// IOKit status code (`kIOReturnSuccess` == 0 on success) so callers can
+    /// log whether the device actually accepted the write.
+    @discardableResult
+    private static func setElement(keyboard: IOHIDDevice, element: IOHIDElement, value: Int) -> IOReturn {
         let newValue = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, value)
-        _ = IOHIDDeviceSetValue(keyboard, element, newValue)
+        return IOHIDDeviceSetValue(keyboard, element, newValue)
     }
 }
 #endif
