@@ -27,22 +27,27 @@ final class ScreenFlasher: @unchecked Sendable {
     /// `CGDisplaySetDisplayBrightness(display, level)`, if the symbol resolved.
     private let setBrightness: ((CGDirectDisplayID, CGFloat) -> Void)?
 
-    /// `RTLD_DEFAULT` is `((void *) -2)` on Darwin. Built directly from the
-    /// numeric value so this file does not rely on the `RTLD_DEFAULT`
-    /// constant being visible in the Darwin module (it is not, in this
-    /// target's build), while `dlsym` itself resolves without issue.
-    private static let rtldDefault = UnsafeMutableRawPointer(bitPattern: -2)!
+    /// `RTLD_DEFAULT` is `((void *) -2)` on Darwin. The numeric value is
+    /// stored (it is `Sendable`) and the pointer handle is built locally at
+    /// each `dlsym` call, so no non-`Sendable` type lives in a static storage
+    /// slot under strict concurrency. This also avoids depending on the
+    /// `RTLD_DEFAULT` constant being visible in the Darwin module.
+    private static let rtldDefaultBitPattern: Int = -2
+    private static var rtldDefaultHandle: UnsafeMutableRawPointer {
+        UnsafeMutableRawPointer(bitPattern: Self.rtldDefaultBitPattern)!
+    }
 
     init(pulseGap: Double = 0.25, dimFraction: Double = 0.15) {
         self.pulseGap = pulseGap
         self.dimFraction = dimFraction
 
+        let handle = Self.rtldDefaultHandle
         var getter: ((CGDirectDisplayID) -> CGFloat)?
         var setter: ((CGDirectDisplayID, CGFloat) -> Void)?
-        if let sym = dlsym(Self.rtldDefault, "CGDisplayBrightness") {
+        if let sym = dlsym(handle, "CGDisplayBrightness") {
             getter = unsafeBitCast(sym, to: ((CGDirectDisplayID) -> CGFloat).self)
         }
-        if let sym = dlsym(Self.rtldDefault, "CGDisplaySetDisplayBrightness") {
+        if let sym = dlsym(handle, "CGDisplaySetDisplayBrightness") {
             setter = unsafeBitCast(sym, to: ((CGDirectDisplayID, CGFloat) -> Void).self)
         }
         self.getBrightness = getter
