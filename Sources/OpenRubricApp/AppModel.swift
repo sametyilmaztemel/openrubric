@@ -112,7 +112,9 @@ final class AppModel {
 
     /// Persists the answer, its letter, the model, and the token accounting
     /// for this turn. The cost is resolved from the model pricing table;
-    /// `nil` when the model is not in the table (no made-up prices).
+    /// `nil` when the model is not in the table (no made-up prices). A
+    /// write failure is logged (not thrown) so a full Application Support
+    /// directory never crashes the cycle — but is not silent either.
     private func recordHistory(result: CompletionResult, parsed: ParsedAnswer, model: String) {
         let letter = parsed.letter
         let cost = TokenCostEstimator.pricing(for: model)?.cost(of: result.usage)
@@ -123,7 +125,11 @@ final class AppModel {
             usage: result.usage,
             costUSD: cost
         )
-        try? history.record(entry)
+        do {
+            try history.record(entry)
+        } catch {
+            NSLog("OpenRubric: failed to record history entry: \(error)")
+        }
     }
 
     private func setPhase(_ new: Phase) {

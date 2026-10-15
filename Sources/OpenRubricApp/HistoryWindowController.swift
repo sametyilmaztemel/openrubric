@@ -11,6 +11,14 @@ final class HistoryWindowController: NSWindowController {
     private var entries: [HistoryEntry] = []
     private let limit = 50
 
+    /// Shared time formatter (hoisted out of per-cell allocation).
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
     init(store: HistoryStore) {
         self.store = store
         let window = NSWindow(
@@ -95,7 +103,7 @@ final class HistoryWindowController: NSWindowController {
         entries = store.entries(limit: limit)
         tableView.reloadData()
         let total = entries.compactMap(\.costUSD).reduce(0, +)
-        totalLabel?.stringValue = "Total (last \(entries.count)): \(String(format: "$%.4f", total))"
+        totalLabel?.stringValue = "Total of last \(entries.count) answers: \(String(format: "$%.4f", total))"
     }
 
     @objc private func clear() {
@@ -123,9 +131,7 @@ extension HistoryWindowController: NSTableViewDataSource, NSTableViewDelegate {
                 cell.font = NSFont.systemFont(ofSize: 11)
                 cell.lineBreakMode = .byTruncatingTail
             }
-            let formatter = DateFormatter()
-            formatter.dateStyle = .none
-            formatter.timeStyle = .short
+            let formatter = Self.timeFormatter
             switch colID {
             case "date":
                 cell.stringValue = formatter.string(from: entry.timestamp)
