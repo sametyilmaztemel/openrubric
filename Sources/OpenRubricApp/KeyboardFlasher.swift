@@ -107,11 +107,15 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Both are clamped to the element's maximum value, so no out-of-range
     /// write is ever sent.
     private static func pulseBacklight(keyboard: IOHIDDevice, count: Int, gap: Double) {
-        // Look each candidate up once, in order, and keep the elements found
-        // for each. The selection policy ("first candidate that matched an
-        // element wins") is pure and unit tested in FlashMath.
-        let found = FlashMath.backlightCandidates.map {
-            matchingElements(on: keyboard, page: $0.page, usage: $0.usage)
+        // Look candidates up in order and stop at the first one that matches
+        // an element (early break: built-in keyboards hit the Apple vendor
+        // page first, so the common case is a single lookup). The "first
+        // non-empty wins" selection is still the pure, unit-tested policy.
+        var found: [[IOHIDElement]] = []
+        for candidate in FlashMath.backlightCandidates {
+            let elements = matchingElements(on: keyboard, page: candidate.page, usage: candidate.usage)
+            found.append(elements)
+            if !elements.isEmpty { break }
         }
         guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
               let element = found[index].first else { return }
