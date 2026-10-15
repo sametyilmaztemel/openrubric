@@ -15,10 +15,11 @@ import OpenRubricCore
 /// Keyboard output channels driven through IOKit HID.
 ///
 /// Both are best-effort: a keyboard without the relevant element simply
-/// does not react, and nothing here throws. The Caps Lock channel writes
-/// the blink count as the LED value (0 = off, 1 = on, 2+ = blink that many
-/// times, after which the keyboard hardware returns to its steady state).
-/// The backlight channel pulses a brightness element and restores it.
+/// does not react, and nothing here throws. The Caps Lock channel blinks the
+/// LED `count` times by pulsing it on/off per cycle (the element is an on/off
+/// LED, so the count is never written as a single value — that would clamp to
+/// the max of 1 and leave the LED lit). The backlight channel pulses a
+/// brightness element and restores it.
 ///
 /// The IOKit Swift overlay renames the CF pointer types:
 /// `IOHIDManagerRef`/`IOHIDDeviceRef`/`IOHIDElementRef`/`IOHIDValueRef`
@@ -93,11 +94,16 @@ final class KeyboardFlasher: @unchecked Sendable {
         guard !elements.isEmpty else { return }
         for element in elements {
             let resting = readElement(keyboard: keyboard, element: element) ?? 0
-            let inverse = resting == 0 ? 1 : 0     // opposite of resting => always a visible change
+            // Clamp to the element's logical max so no out-of-range write is
+            // ever sent (a max-0 LED can't show "on", so the blink is
+            // invisible on such hardware — same as before).
+            let maxValue = Int(IOHIDElementGetLogicalMax(element))
+            let inverse = FlashMath.clampedBlinkCount(resting == 0 ? 1 : 0, maxValue: maxValue)
+            let restore = FlashMath.clampedBlinkCount(resting, maxValue: maxValue)
             for _ in 0..<count {
                 setElement(keyboard: keyboard, element: element, value: inverse)
                 Thread.sleep(forTimeInterval: gap)
-                setElement(keyboard: keyboard, element: element, value: resting)
+                setElement(keyboard: keyboard, element: element, value: restore)
                 Thread.sleep(forTimeInterval: gap)
             }
         }
