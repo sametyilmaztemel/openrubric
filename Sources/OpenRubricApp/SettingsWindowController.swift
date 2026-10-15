@@ -18,12 +18,15 @@ final class SettingsWindowController: NSWindowController {
     private let explanationToggle = NSButton(checkboxWithTitle: "Include one-sentence explanation", target: nil, action: nil)
     private let cropField = NSTextField()
     private let apiKeyField = NSSecureTextField()
+    private let ledToggle = NSButton(checkboxWithTitle: "Caps Lock LED blinks (A=1…D=4)", target: nil, action: nil)
+    private let screenFlashToggle = NSButton(checkboxWithTitle: "Screen brightness pulses", target: nil, action: nil)
+    private let backlightToggle = NSButton(checkboxWithTitle: "Keyboard backlight pulses", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
 
     init(store: AppSettingsStore) {
         self.store = store
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -54,6 +57,14 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(row("API key", control: apiKeyField))
         stack.addArrangedSubview(row("Crop radius (pt)", control: cropField))
         stack.addArrangedSubview(explanationToggle)
+
+        let flashHeader = NSTextField(labelWithString: "Discreet output (multiple choice only)")
+        flashHeader.font = .systemFont(ofSize: 12, weight: .semibold)
+        flashHeader.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(flashHeader)
+        stack.addArrangedSubview(ledToggle)
+        stack.addArrangedSubview(screenFlashToggle)
+        stack.addArrangedSubview(backlightToggle)
 
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -115,6 +126,9 @@ final class SettingsWindowController: NSWindowController {
         explanationToggle.state = settings.includeExplanation ? .on : .off
         cropField.stringValue = String(Int(settings.cropRadius))
         apiKeyField.stringValue = store.apiKey ?? ""
+        ledToggle.state = settings.flashChannels.contains(.capsLockLED) ? .on : .off
+        screenFlashToggle.state = settings.flashChannels.contains(.screenFlash) ? .on : .off
+        backlightToggle.state = settings.flashChannels.contains(.keyboardBacklight) ? .on : .off
 
         providerPicker.target = self
         providerPicker.action = #selector(providerChanged)
@@ -135,13 +149,18 @@ final class SettingsWindowController: NSWindowController {
         let provider = ApiProvider.allCases[safe: providerPicker.indexOfSelectedItem] ?? .anthropic
         let promptMode = PromptMode.allCases[safe: promptModePicker.indexOfSelectedItem] ?? .multipleChoice
         let radius = max(60, CGFloat(Int(cropField.stringValue) ?? 260))
+        var channels = Set<FlashChannel>()
+        if ledToggle.state == .on { channels.insert(.capsLockLED) }
+        if screenFlashToggle.state == .on { channels.insert(.screenFlash) }
+        if backlightToggle.state == .on { channels.insert(.keyboardBacklight) }
         let newSettings = OpenRubricSettings(
             apiProvider: provider,
             baseURL: baseURLField.stringValue,
             model: modelField.stringValue,
             promptMode: promptMode,
             includeExplanation: explanationToggle.state == .on,
-            cropRadius: radius
+            cropRadius: radius,
+            flashChannels: channels
         )
         do {
             try store.apply(newSettings, apiKey: apiKeyField.stringValue)
