@@ -183,8 +183,10 @@ final class SettingsWindowController: NSWindowController {
 extension ApiProvider {
     var displayName: String {
         switch self {
-        case .anthropic: return "Anthropic (Claude)"
-        case .openAICompatible: return "OpenAI-compatible"
+        case .anthropic: return "Anthropic (Claude Haiku)"
+        case .openAI: return "OpenAI (ChatGPT vision)"
+        case .deepseek: return "DeepSeek (vision)"
+        case .openAICompatible: return "OpenAI-compatible (custom)"
         }
     }
 }

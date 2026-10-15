@@ -8,6 +8,10 @@ public enum ApiProvider: String, Codable, CaseIterable, Sendable {
     /// Anthropic Messages API (api.anthropic.com or an Anthropic-compatible
     /// proxy such as https://api.minimax.io/anthropic).
     case anthropic
+    /// OpenAI Chat Completions (api.openai.com) — vision-capable models.
+    case openAI
+    /// DeepSeek (api.deepseek.com), OpenAI-compatible — cheap vision models.
+    case deepseek
     /// OpenAI-compatible chat/completions (OpenAI, Groq, OpenRouter, Ollama, vLLM).
     case openAICompatible
 }
@@ -48,6 +52,10 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         switch provider {
         case .anthropic:
             return "https://api.anthropic.com"
+        case .openAI:
+            return "https://api.openai.com/v1"
+        case .deepseek:
+            return "https://api.deepseek.com"
         case .openAICompatible:
             return "https://api.openai.com/v1"
         }
@@ -57,6 +65,10 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         switch provider {
         case .anthropic:
             return "claude-haiku-5-5"
+        case .openAI:
+            return "gpt-4o-mini"
+        case .deepseek:
+            return "deepseek-flash"
         case .openAICompatible:
             return "gpt-4o-mini"
         }
@@ -71,7 +83,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
                 configuration: .init(baseURL: baseURL, apiKey: apiKey, model: model),
                 session: session
             )
-        case .openAICompatible:
+        case .openAI, .deepseek, .openAICompatible:
             return try OpenAICompatibleClient(
                 configuration: .init(baseURL: baseURL, apiKey: apiKey, model: model),
                 session: session
