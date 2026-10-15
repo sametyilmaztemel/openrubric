@@ -79,7 +79,7 @@ public struct AnthropicClient: ChatCompletionsClient, @unchecked Sendable {
         self.url = resolved
     }
 
-    public func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> String {
+    public func completion(systemPrompt: String, userPrompt: String, imagePNG: Data) async throws -> CompletionResult {
         // Messages API shape: `system` is a top-level parameter; the image
         // is a base64 content block inside the user message.
         let body: [String: Any] = [
@@ -131,7 +131,16 @@ public struct AnthropicClient: ChatCompletionsClient, @unchecked Sendable {
         guard !text.isEmpty else {
             throw Error.emptyContent
         }
-        return text
+        return CompletionResult(text: text, usage: parseUsage(from: json))
+    }
+
+    /// Messages API usage block: `input_tokens` / `output_tokens`.
+    private func parseUsage(from json: [String: Any]) -> TokenUsage? {
+        guard let usage = json["usage"] as? [String: Any] else { return nil }
+        let input = (usage["input_tokens"] as? NSNumber)?.intValue
+        let output = (usage["output_tokens"] as? NSNumber)?.intValue
+        guard let input, let output else { return nil }
+        return TokenUsage(inputTokens: input, outputTokens: output)
     }
 
     /// Anthropic errors arrive as `{"type":"error","error":{"type":...,"message":...}}`

@@ -105,7 +105,8 @@ struct AnthropicClientTests {
         let client = try makeClient()
         let png = Data([0x89, 0x50, 0x4E, 0x47])
         let raw = try await client.completion(systemPrompt: "sys", userPrompt: "user", imagePNG: png)
-        #expect(raw.contains("ANSWER: B"))
+        #expect(raw.text.contains("ANSWER: B"))
+        #expect(raw.usage == nil)   // default stub body has no usage block
 
         let idx = AnthropicStubProtocol.recorded
             .lastIndex { $0.request.url?.absoluteString == client.url.absoluteString }
@@ -131,6 +132,16 @@ struct AnthropicClientTests {
         #expect((source?["data"] as? String)?.count == png.base64EncodedString().count)
         let textPart = content?.first { ($0["type"] as? String) == "text" }
         #expect(textPart?["text"] as? String == "user")
+    }
+
+    @Test("usage: parses input_tokens/output_tokens from the Messages API response")
+    func usage() async throws {
+        let rawBody = #"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ANSWER: B"}],"stop_reason":"end_turn","usage":{"input_tokens":1200,"output_tokens":40}}"#
+        let client = try makeClient(rawBody: rawBody)
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        let raw = try await client.completion(systemPrompt: "sys", userPrompt: "user", imagePNG: png)
+        #expect(raw.text.contains("ANSWER: B"))
+        #expect(raw.usage == TokenUsage(inputTokens: 1200, outputTokens: 40))
     }
 
     @Test("proxy base URL already ending in /v1 does not double the path")
