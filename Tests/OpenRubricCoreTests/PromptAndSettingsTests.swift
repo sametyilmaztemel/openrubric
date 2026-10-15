@@ -81,4 +81,34 @@ struct SettingsTests {
         #expect(openAI != nil)
         #expect(openAI!.configuration.model == "gpt-4o-mini")
     }
+
+    @Test("named providers (OpenAI, DeepSeek) route to the OpenAI-compatible client")
+    func namedProvidersRouteToOpenAICompatible() throws {
+        let openai = OpenRubricSettings(apiProvider: .openAI)
+        #expect(openai.baseURL == "https://api.openai.com/v1")
+        #expect(openai.model == "gpt-4o-mini")
+        let oaiClient = try openai.makeClient(apiKey: "sk-test")
+        #expect((oaiClient as? OpenAICompatibleClient) != nil)
+
+        let deepseek = OpenRubricSettings(apiProvider: .deepseek)
+        #expect(deepseek.baseURL == "https://api.deepseek.com")
+        #expect(deepseek.model == "deepseek-flash")
+        let dClient = try deepseek.makeClient(apiKey: "sk-test")
+        let d = dClient as? OpenAICompatibleClient
+        #expect(d != nil)
+        #expect(d!.configuration.baseURL == "https://api.deepseek.com")
+        #expect(d!.configuration.model == "deepseek-flash")
+    }
+
+    @Test("a saved v2 settings payload without the new cases still decodes")
+    func backwardsCompatDecode() throws {
+        // Payload written before .openAI / .deepseek existed (only the two
+        // original raw values are legal). Decoding it must not fail.
+        let legacy = """
+        {"apiProvider":"anthropic","baseURL":"https://api.anthropic.com","model":"claude-haiku-5-5","promptMode":"multipleChoice","includeExplanation":true,"cropRadius":260,"flashChannels":["capsLockLED"]}
+        """
+        let decoded = try JSONDecoder().decode(OpenRubricSettings.self, from: Data(legacy.utf8))
+        #expect(decoded.apiProvider == .anthropic)
+        #expect(decoded.baseURL == "https://api.anthropic.com")
+    }
 }

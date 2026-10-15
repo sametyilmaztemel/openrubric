@@ -59,8 +59,26 @@ in **Settings…**.
   (menu bar → History…). The question screenshot is never stored.
 - **Token cost** — per-turn cost from the provider's reported usage and a
   documented pricing table; unknown models show "—" rather than a guess.
-- **BYO key** — Anthropic (default) or any OpenAI-compatible endpoint;
+- **BYO key** — pick a provider in Settings and paste your own key;
   fully offline with a local Ollama/vLLM model.
+
+## Providers
+
+Choose a provider in **Settings…** — the app fills in the correct base URL
+and a sensible default model. All named providers send the question
+screenshot to a **vision** model.
+
+| Provider | Default model | Endpoint |
+|----------|---------------|----------|
+| Anthropic (Claude Haiku) — *default* | `claude-haiku-5-5` | Anthropic Messages API |
+| OpenAI (ChatGPT vision) | `gpt-4o-mini` | OpenAI Chat Completions |
+| DeepSeek (vision) | `deepseek-flash` | DeepSeek (OpenAI-compatible) |
+| OpenAI-compatible (custom) | `gpt-4o-mini` | any `POST {base}/chat/completions` (Groq, Together, OpenRouter, Ollama, vLLM, …) |
+
+The base URL and model fields stay editable for each preset, so you can
+point the custom option at a local model or a cheaper vision variant.
+OpenAI and DeepSeek use the OpenAI-compatible protocol (a base64
+`image_url` content part), so no extra integration is needed.
 
 ## Privacy
 
