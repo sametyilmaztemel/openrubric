@@ -28,6 +28,15 @@ targets.append(
         dependencies: ["OpenRubricCore"]
     )
 )
+// App-layer tests: settings v1->v2 migration (UserDefaults-based) and other
+// AppKit-bound logic. Depends on the executable target so `@testable import
+// OpenRubricApp` reaches the internal store. Compiled only on macOS.
+targets.append(
+    .testTarget(
+        name: "OpenRubricAppTests",
+        dependencies: ["OpenRubricApp"]
+    )
+)
 #endif
 
 let package = Package(

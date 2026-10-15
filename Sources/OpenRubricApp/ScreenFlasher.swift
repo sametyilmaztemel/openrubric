@@ -2,6 +2,7 @@
 import AppKit
 import CoreGraphics
 import Darwin
+import OpenRubricCore
 
 /// Screen brightness pulses via CoreGraphics.
 ///
@@ -60,9 +61,9 @@ final class ScreenFlasher: @unchecked Sendable {
             guard let get = self.getBrightness, let set = self.setBrightness else { return }
             let display = CGMainDisplayID()
             let original = get(display)
-            guard original > 0 else { return }
+            guard FlashMath.screenFlashEnabled(original: original) else { return }
 
-            let dimmed = max(0.0, original * self.dimFraction)
+            let dimmed = FlashMath.screenDimLevel(original: original, dimFraction: self.dimFraction)
             for _ in 0..<count {
                 set(display, dimmed)
                 Thread.sleep(forTimeInterval: self.pulseGap)

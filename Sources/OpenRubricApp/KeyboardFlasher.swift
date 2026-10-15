@@ -2,16 +2,15 @@
 import AppKit
 import IOKit
 import IOKit.hid
+import OpenRubricCore
 
 // MARK: - Apple vendor page constants
 //
 // Apple built-in keyboards expose the backlight through a vendor page
 // (0xFF00) rather than a standard HID usage. These constants are not in
-// the public headers (AppleHIDUsageTables.h has been empty since 10.14),
-// so they are declared locally.
-private let appleVendorPage = 0xFF00
-private let topCaseUsage = 0x01
-private let keyboardBacklightUsage = 0x0F
+// the public headers (AppleHIDUsageTables.h has been empty since 10.14).
+// The concrete candidate page/usage pairs live in `FlashMath.backlightCandidates`
+// (unit tested); this comment documents why the vendor page is non-obvious.
 
 /// Keyboard output channels driven through IOKit HID.
 ///
@@ -80,10 +79,18 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// such element regardless of type, and writing the value to each is the
     /// same thing a working reference implementation does, so no type filter
     /// is needed.
+    ///
+    /// The count is clamped to the element's reported maximum
+    /// (`IOHIDElementGetLogicalMax`) before the write: a Z (26) answer
+    /// would otherwise be out of range for driver stacks that reject
+    /// writes above the element's max, so clamping preserves the blink intent
+    /// without an out-of-range write.
     private static func writeCapsLock(keyboard: IOHIDDevice, count: Int) {
         let elements = matchingElements(on: keyboard, page: kHIDPage_LEDs, usage: kHIDUsage_LED_CapsLock)
         for element in elements {
-            setElement(keyboard: keyboard, element: element, value: count)
+            let maxValue = Int(IOHIDElementGetLogicalMax(element))
+            let clamped = FlashMath.clampedBlinkCount(count, maxValue: maxValue)
+            setElement(keyboard: keyboard, element: element, value: clamped)
         }
     }
 
@@ -91,29 +98,23 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// level afterwards.
     ///
     /// Backlight elements appear in different shapes depending on the
-    /// hardware, so several page/usage pairs are tried in order and the first
-    /// that yields an element is used:
-    ///   - Apple vendor page (0xFF00): KeyboardBacklight (0x0F) / TopCase
-    ///     (0x01) - built-in MacBook keyboards.
-    ///   - Consumer page brightness (0x79 / 0x7A) - some third-party.
-    ///   - GenericDesktop 0x6F - a non-standard slot some keyboards use.
+    /// hardware, so several page/usage pairs are probed in order (the ordered
+    /// candidate list lives in `FlashMath.backlightCandidates`, which is unit
+    /// tested). The first candidate that matches an element wins. The two
+    /// levels of a pulse are decided by `FlashMath.backlightPulse`:
+    ///   - backlight on  -> dim to 0, restore to the original level;
+    ///   - backlight off -> blip up to a minimum visible level, back to 0.
+    /// Both are clamped to the element's maximum value, so no out-of-range
+    /// write is ever sent.
     private static func pulseBacklight(keyboard: IOHIDDevice, count: Int, gap: Double) {
-        let candidates: [(page: Int, usage: Int)] = [
-            (appleVendorPage, keyboardBacklightUsage),
-            (appleVendorPage, topCaseUsage),
-            (kHIDPage_Consumer, 0x79),
-            (kHIDPage_Consumer, 0x7A),
-            (kHIDPage_GenericDesktop, 0x6F)
-        ]
-        var element: IOHIDElement?
-        for c in candidates {
-            let found = matchingElements(on: keyboard, page: c.page, usage: c.usage)
-            if let first = found.first {
-                element = first
-                break
-            }
+        // Look each candidate up once, in order, and keep the elements found
+        // for each. The selection policy ("first candidate that matched an
+        // element wins") is pure and unit tested in FlashMath.
+        let found = FlashMath.backlightCandidates.map {
+            matchingElements(on: keyboard, page: $0.page, usage: $0.usage)
         }
-        guard let element else { return }
+        guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
+              let element = found[index].first else { return }
 
         // Read the current level so it can be restored after the pulse.
         // The placeholder value is bound to a local so ARC keeps it alive
@@ -139,10 +140,17 @@ final class KeyboardFlasher: @unchecked Sendable {
             Unmanaged.passUnretained(returned).release()
         }
 
+        let maxValue = Int(IOHIDElementGetLogicalMax(element))
+        let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)
+        guard FlashMath.backlightPulseVisible(original: original, maxValue: maxValue, pulseLevel: pulseLevel) else {
+            return
+        }
+        let levels = FlashMath.backlightPulse(original: original, maxValue: maxValue, pulseLevel: pulseLevel)
+
         for _ in 0..<count {
-            setElement(keyboard: keyboard, element: element, value: 0)
+            setElement(keyboard: keyboard, element: element, value: levels.set)
             Thread.sleep(forTimeInterval: gap)
-            setElement(keyboard: keyboard, element: element, value: original)
+            setElement(keyboard: keyboard, element: element, value: levels.restore)
             Thread.sleep(forTimeInterval: gap)
         }
     }
