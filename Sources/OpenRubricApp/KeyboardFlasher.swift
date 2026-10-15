@@ -47,7 +47,9 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// restored afterwards, so a cycle never leaves Caps Lock on.
     func flashCapsLock(count: Int) {
         queue.async {
-            for keyboard in Self.keyboards() {
+            let keyboards = Self.keyboards()
+            NSLog("OpenRubric flash: capsLock count=\(count) keyboards=\(keyboards.count)")
+            for keyboard in keyboards {
                 Self.blinkCapsLock(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
         }
@@ -56,7 +58,9 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Pulses the keyboard backlight, `count` times.
     func flashBacklight(count: Int) {
         queue.async {
-            for keyboard in Self.keyboards() {
+            let keyboards = Self.keyboards()
+            NSLog("OpenRubric flash: backlight count=\(count) keyboards=\(keyboards.count)")
+            for keyboard in keyboards {
                 Self.pulseBacklight(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
         }
@@ -91,13 +95,14 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Lock on).
     private static func blinkCapsLock(keyboard: IOHIDDevice, count: Int, gap: Double) {
         let elements = matchingElements(on: keyboard, page: kHIDPage_LEDs, usage: kHIDUsage_LED_CapsLock)
-        guard !elements.isEmpty else { return }
+        guard !elements.isEmpty else {
+            NSLog("OpenRubric flash: capsLock element NOT FOUND on keyboard")
+            return
+        }
         for element in elements {
             let resting = readElement(keyboard: keyboard, element: element) ?? 0
-            // Clamp to the element's logical max so no out-of-range write is
-            // ever sent (a max-0 LED can't show "on", so the blink is
-            // invisible on such hardware — same as before).
             let maxValue = Int(IOHIDElementGetLogicalMax(element))
+            NSLog("OpenRubric flash: capsLock element found max=\(maxValue) resting=\(resting)")
             let inverse = FlashMath.clampedBlinkCount(resting == 0 ? 1 : 0, maxValue: maxValue)
             let restore = FlashMath.clampedBlinkCount(resting, maxValue: maxValue)
             for _ in 0..<count {
@@ -150,15 +155,23 @@ final class KeyboardFlasher: @unchecked Sendable {
             if !elements.isEmpty { break }
         }
         guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
-              let element = found[index].first else { return }
+              let element = found[index].first else {
+            NSLog("OpenRubric flash: backlight element NOT FOUND (candidate counts: \(found.map(\.count)))")
+            return
+        }
 
         // Read the current level so it can be restored after the pulse; a
         // failed read means we cannot restore, so skip (best-effort channel).
-        guard let original = readElement(keyboard: keyboard, element: element) else { return }
+        guard let original = readElement(keyboard: keyboard, element: element) else {
+            NSLog("OpenRubric flash: backlight readElement FAILED")
+            return
+        }
 
         let maxValue = Int(IOHIDElementGetLogicalMax(element))
         let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)
+        NSLog("OpenRubric flash: backlight element found max=\(maxValue) original=\(original) pulseLevel=\(pulseLevel)")
         guard FlashMath.backlightPulseVisible(original: original, maxValue: maxValue, pulseLevel: pulseLevel) else {
+            NSLog("OpenRubric flash: backlight pulse not visible (skipped)")
             return
         }
         let levels = FlashMath.backlightPulse(original: original, maxValue: maxValue, pulseLevel: pulseLevel)

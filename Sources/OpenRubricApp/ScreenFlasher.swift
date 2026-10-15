@@ -58,10 +58,17 @@ final class ScreenFlasher: @unchecked Sendable {
     /// Dims the main display and restores it, `count` times.
     func flash(count: Int) {
         queue.async {
-            guard let get = self.getBrightness, let set = self.setBrightness else { return }
+            guard let get = self.getBrightness, let set = self.setBrightness else {
+                NSLog("OpenRubric flash: screen brightness symbols NOT resolved (silent no-op)")
+                return
+            }
             let display = CGMainDisplayID()
             let original = get(display)
-            guard FlashMath.screenFlashEnabled(original: original) else { return }
+            NSLog("OpenRubric flash: screen count=\(count) brightness=\(original)")
+            guard FlashMath.screenFlashEnabled(original: original) else {
+                NSLog("OpenRubric flash: screen already at 0 (skipped)")
+                return
+            }
 
             let dimmed = FlashMath.screenDimLevel(original: original, dimFraction: self.dimFraction)
             for _ in 0..<count {
