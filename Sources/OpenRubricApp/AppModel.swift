@@ -26,6 +26,7 @@ final class AppModel {
     private let hotkey: HotkeyManager
     private let flash: FlashCoordinator
     private let history: HistoryStore
+    private var previewWindow: CropPreviewWindow?
 
     private(set) var phase: Phase = .idle
     private var inFlight: Task<Void, Never>?
@@ -53,7 +54,30 @@ final class AppModel {
 
     func startHotkey() {
         hotkey.onFire = { [weak self] in self?.trigger() }
+        hotkey.onPreview = { [weak self] in self?.previewCrop() }
         hotkey.start()
+    }
+
+    /// Shows the cursor-centred crop without asking the model (⌃⌥⌘P), so
+    /// the user can confirm the question and its answer choices are inside
+    /// the region before spending a paid answer on it. Uses the same
+    /// capture path as `runCycle`, guaranteeing what they see is what the
+    /// model would receive.
+    func previewCrop() {
+        let task = Task { @MainActor in
+            guard let cursor = Self.cursorInGlobalTopLeftCoordinates() else { return }
+            let radius = Int(store.settings.cropRadius)
+            do {
+                let png = try await capture.captureCrop(cursor: cursor, radius: store.settings.cropRadius)
+                guard let image = NSImage(data: png) else { return }
+                previewWindow?.close()
+                previewWindow = CropPreviewWindow(image: image, radius: radius)
+                previewWindow?.orderFrontRegardless()
+            } catch {
+                NSLog("OpenRubric: crop preview failed: \(error)")
+            }
+        }
+        _ = task
     }
 
     func stopHotkey() {
