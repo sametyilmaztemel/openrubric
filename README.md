@@ -13,7 +13,7 @@ endpoint (OpenAI, Groq, Together, OpenRouter, a local Ollama, vLLM, …)
 works too.
 
 ```
-cursor on question  ->  ^O+C+Enter  ->  crop around cursor
+cursor on question  ->  Control+Option+Command+A  ->  crop around cursor
         ->  Claude Haiku (your key)  ->  "B — high"
         ->  menu bar icon / hidden panel / Caps Lock LED / brightness flash
 ```
@@ -30,6 +30,8 @@ the disk image, and drag **OpenRubric.app** to Applications.
   choose **Open** (ad-hoc builds are not notarized).
 - Add your API key in **Settings…** (menu bar icon). The key is stored in
   the macOS Keychain and never written to disk.
+- The packaged build targets **Apple Silicon (arm64)**. For an Intel Mac,
+  build locally from source with `./scripts/build-dmg.sh`.
 
 ## Required permissions
 
@@ -38,7 +40,7 @@ Grant each when macOS asks (System Settings → Privacy & Security):
 | Permission | Used for | Where |
 |---|---|---|
 | Screen Recording | ScreenCaptureKit crop around the cursor | Privacy & Security → Screen Recording |
-| Accessibility | the global `^O+C+Enter` hotkey | Privacy & Security → Accessibility |
+| Accessibility | the global `Control+Option+Command+A` hotkey | Privacy & Security → Accessibility |
 | Input Monitoring | reading Caps Lock state for the LED channel | Privacy & Security → Input Monitoring |
 
 The Caps Lock LED, keyboard-backlight, and screen-flash channels are

@@ -16,6 +16,8 @@ set -euo pipefail
 OUT_DIR="${1:-dist}"
 APP_NAME="OpenRubric"
 APP="$OUT_DIR/$APP_NAME.app"
+VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || echo dev)"
+DMG="$OUT_DIR/$APP_NAME-$VERSION.dmg"
 
 echo "==> swift build (release)"
 swift build -c release --product "$APP_NAME"
@@ -38,15 +40,22 @@ fi
 codesign --verify --deep --strict "$APP" && echo "    signature OK"
 
 echo "==> DMG"
-rm -f "$OUT_DIR/$APP_NAME.dmg"
-hdiutil create -volname "$APP_NAME" -srcfolder "$APP" -ov   -format UDZO "$OUT_DIR/$APP_NAME.dmg"
+# Stage the bundle in its own parent directory: `hdiutil -srcfolder` copies
+# the *contents* of the given folder to the volume root, so pointing it at
+# OpenRubric.app directly would drop a loose Contents/ folder onto the
+# volume instead of an OpenRubric.app item.
+rm -rf "$OUT_DIR/stage"
+mkdir -p "$OUT_DIR/stage"
+cp -R "$APP" "$OUT_DIR/stage/"
+rm -f "$DMG"
+hdiutil create -volname "$APP_NAME" -srcfolder "$OUT_DIR/stage" -ov   -format UDZO "$DMG"
 
 if [ -n "${APPLE_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ] &&    [ -n "${APPLE_APP_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
   echo "==> notarize"
-  xcrun notarytool submit "$OUT_DIR/$APP_NAME.dmg"     --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD"     --team-id "$APPLE_TEAM_ID" --wait
-  xcrun notarytool staple "$OUT_DIR/$APP_NAME.dmg"
+  xcrun notarytool submit "$DMG"     --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD"     --team-id "$APPLE_TEAM_ID" --wait
+  xcrun notarytool staple "$DMG"
 else
   echo "==> notarization skipped (no APPLE_ID/APP_PASSWORD/TEAM_ID)"
 fi
 
-echo "==> done: $OUT_DIR/$APP_NAME.dmg"
+echo "==> done: $DMG"
