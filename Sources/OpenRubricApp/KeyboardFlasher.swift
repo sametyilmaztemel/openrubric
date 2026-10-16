@@ -173,17 +173,18 @@ final class KeyboardFlasher: @unchecked Sendable {
 
         func call(_ selector: UInt32, _ input: [UInt64]) -> UInt64? {
             var input = input
-            var output: [UInt64] = [0]
+            var output: UInt64 = 0
+            var outputCount: UInt32 = 1
             let kr = IOConnectCallScalarMethod(
                 connection, selector,
                 &input, UInt32(input.count),
-                &output, &output.count
+                &output, &outputCount
             )
             guard kr == KERN_SUCCESS else {
                 FlashDiagnostics.note("flash: backlight selector=\(selector) IOConnectCallScalarMethod FAILED status=\(kr)")
                 return nil
             }
-            return output.first
+            return output
         }
 
         guard let originalRaw = call(1, [0]) else { return }

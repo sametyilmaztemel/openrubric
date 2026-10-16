@@ -223,7 +223,7 @@ final class CameraLEDFlasher: @unchecked Sendable {
             let resting = try SMC.readValue(connection: connection, size: info.size)
             FlashDiagnostics.note("flash: cameraLED [SMC] resting=\(resting) count=\(count)")
             let levels = FlashMath.cameraLEDPulse(resting: resting)
-            for cycle in 0..<count {
+            for _ in 0..<count {
                 try SMC.writeValue(connection: connection, size: info.size, value: levels.set)
                 Thread.sleep(forTimeInterval: self.pulseGap)
                 try SMC.writeValue(connection: connection, size: info.size, value: levels.restore)

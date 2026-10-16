@@ -72,13 +72,12 @@ final class ScreenFlasher: @unchecked Sendable {
     func flash(count: Int) {
         queue.async {
             let display = CGMainDisplayID()
-            let get = self.cdGet
-            let set = self.cdSet
+            let useCoreDisplay = self.cdGet != nil && self.cdSet != nil
 
             // Read the current level through whichever mechanism is usable.
             var original: Double?
             var mechanism = "none"
-            if let get, let set {
+            if useCoreDisplay, let get = self.cdGet {
                 original = get(display)
                 mechanism = "CoreDisplay"
             } else if self.ioService != 0 {
@@ -90,7 +89,7 @@ final class ScreenFlasher: @unchecked Sendable {
                 }
             }
             guard let original else {
-                FlashDiagnostics.note("flash: screen UNAVAILABLE (coreDisplay=\(get != nil && set != nil ? "ok" : "missing"), iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
+                FlashDiagnostics.note("flash: screen UNAVAILABLE (coreDisplay=\(useCoreDisplay ? "ok" : "missing"), iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
                 return
             }
             guard FlashMath.screenFlashEnabled(original: CGFloat(original)) else {
@@ -102,7 +101,7 @@ final class ScreenFlasher: @unchecked Sendable {
             FlashDiagnostics.note("flash: screen [\(mechanism)] count=\(count) brightness=\(original) dimming to \(dimmed)")
 
             let apply: (Double) -> Void = { level in
-                if let set, get != nil {
+                if useCoreDisplay, let set = self.cdSet {
                     set(display, level)
                 } else {
                     _ = IODisplaySetFloatParameter(self.ioService, 0, "brightness" as CFString, Float(level))
