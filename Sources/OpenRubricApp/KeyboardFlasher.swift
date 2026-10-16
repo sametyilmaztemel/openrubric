@@ -40,29 +40,181 @@ final class KeyboardFlasher: @unchecked Sendable {
 
     /// Blinks the Caps Lock LED `count` times (A=1 ...).
     ///
-    /// The LED is an on/off element, so "blink N times" is a pulse loop
-    /// (on -> off -> on -> off ...), not a single value write: a one-shot
-    /// write of the count clamps to the element's max of 1 and leaves the
-    /// LED lit instead of flashing. The resting state is read first and
-    /// restored afterwards, so a cycle never leaves Caps Lock on.
+    /// The **built-in** MacBook keyboard is driven by the `HIDCapsLockLED`
+    /// service property (macOS 26+) or `IOHIDSetModifierLockState`
+    /// (macOS 10.6+) — see `blinkBuiltInCapsLED`. Its HID LED element write
+    /// returns `kIOReturnMethodNotSupported` (0xE00002CD), which is why the
+    /// dedicated path exists. **External** HID keyboards still use the
+    /// element-write fallback (`blinkCapsLock` per device). All paths are
+    /// best-effort and log their outcome.
     func flashCapsLock(count: Int) {
         queue.async {
+            // 1. Built-in LED via the HID service property (no case change).
+            var doneBuiltIn = false
+            do {
+                try Self.blinkBuiltInCapsLED(count: count, gap: self.pulseGap)
+                doneBuiltIn = true
+            } catch {
+                FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] unavailable: \(error)")
+            }
+
+            // 2. External HID keyboards via element writes (built-in's HID
+            //    write returns MethodNotSupported, so this covers the others).
             let keyboards = Self.keyboards()
-            FlashDiagnostics.note("flash: capsLock count=\(count) keyboards=\(keyboards.count)")
+            FlashDiagnostics.note("flash: capsLock count=\(count) keyboards=\(keyboards.count) builtIn=\(doneBuiltIn)")
             for keyboard in keyboards {
                 Self.blinkCapsLock(keyboard: keyboard, count: count, gap: self.pulseGap)
             }
         }
     }
 
+    /// Blinks the **built-in** keyboard's caps lock LED `count` times.
+    ///
+    /// Two mechanisms, feature-detected at runtime (best-effort, logged):
+    ///
+    /// 1. `HIDCapsLockLED` service property (`"On"`/`"Off"`/`"Auto"`) on the
+    ///    built-in HID service — the clean path (Karabiner's mechanism, used
+    ///    by pi-caps-blink): drives the LED without touching the typing case.
+    ///    Probed by reading the property; when the read returns nothing the
+    ///    OS does not support it and we fall through.
+    /// 2. `IOHIDSetModifierLockState` on the `IOHIDSystem` service
+    ///    (`kIOHIDCapsLockState` = 1) — public since macOS 10.6 and verified
+    ///    working on Sequoia 15.x (kanata, the Qiita Swift snippet, the
+    ///    `lock_keys` crate all use it). Side effect: the real caps lock
+    ///    modifier state is toggled for the duration of each pulse, so we
+    ///    read the resting state first and restore it at the end; the LED
+    ///    follows the state, so the blink is visible.
+    ///
+    /// Neither path can leave the LED stuck: path 1 ends in `"Auto"`,
+    /// path 2 ends at the resting state.
+    private enum CapsLEDMode: String {
+        case on = "On", off = "Off", auto = "Auto"
+    }
+
+    private struct BuiltInCapsLEDError: Error, CustomStringConvertible {
+        let text: String
+        var description: String { text }
+    }
+
+    /// Constants from IOKit/hid/IOHIDLib.h (kept as literals so the code does
+    /// not depend on which overlay header exposes them).
+    private static let ioHIDSystemClass = "IOHIDSystem"
+    private static let hidParamConnectType: UInt32 = 1
+    private static let hidCapsLockState: Int32 = 1
+
+    private static func blinkBuiltInCapsLED(count: Int, gap: Double) throws {
+        // Locate the built-in keyboard's HID service through the event
+        // system. The services array must outlive every use of `builtIn`
+        // (its elements are owned by the array), so it stays in function
+        // scope rather than an inner `if let` block.
+        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+        let services = IOHIDEventSystemClientCopyServices(client)
+
+        var builtIn: IOHIDServiceClient?
+        if let services {
+            let n = CFArrayGetCount(services)
+            for i in 0..<n {
+                guard let raw = CFArrayGetValueAtIndex(services, i) else { continue }
+                // takeUnretainedValue (not unsafeBitCast to the class type):
+                // the element is owned by `services`, and a class-typed cast
+                // would make ARC emit a phantom release on the local.
+                let service = Unmanaged<IOHIDServiceClient>.fromOpaque(raw).takeUnretainedValue()
+                // GenericDesktop (0x01) / Keyboard (0x06).
+                guard IOHIDServiceClientConformsTo(service, 0x01, 0x06) != 0 else { continue }
+                if let flag = IOHIDServiceClientCopyProperty(service, "Built-In" as CFString),
+                   (flag as? NSNumber)?.boolValue == true {
+                    builtIn = service
+                    break
+                }
+            }
+        }
+
+        // Path 1: HIDCapsLockLED property (feature-detect by read, verified
+        // by write + read-back inside blinkViaCapsLEDProperty). Any failure
+        // falls through to path 2 instead of skipping the built-in LED.
+        if let target = builtIn {
+            if IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) != nil {
+                do {
+                    try blinkViaCapsLEDProperty(target, count: count, gap: gap)
+                    return
+                } catch {
+                    FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] failed: \(error) — using modifier-lock state")
+                }
+            } else {
+                FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] property not supported on this OS — using modifier-lock state")
+            }
+        } else {
+            FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] no built-in keyboard service — using modifier-lock state")
+        }
+
+        // Path 2: IOHIDSetModifierLockState on IOHIDSystem (macOS 10.6+).
+        try blinkViaModifierLockState(count: count, gap: gap)
+    }
+
+    private static func blinkViaCapsLEDProperty(_ target: IOHIDServiceClient, count: Int, gap: Double) throws {
+        func set(_ mode: CapsLEDMode) -> Bool {
+            IOHIDServiceClientSetProperty(target, "HIDCapsLockLED" as CFString, mode.rawValue as NSString)
+        }
+        func read() -> String? {
+            guard let value = IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString),
+                  let str = value as? NSString else { return nil }
+            return str as String
+        }
+        guard set(.auto) else {
+            throw BuiltInCapsLEDError(text: "HIDCapsLockLED write rejected")
+        }
+        // Write + read-back verification: a property that accepts writes but
+        // does not actually move the LED would silently win this path and
+        // never fall through to the modifier-lock mechanism.
+        guard set(.on), read() == "On" else {
+            _ = set(.auto)
+            throw BuiltInCapsLEDError(text: "HIDCapsLockLED write not observable (read-back mismatch)")
+        }
+        FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] built-in service found, writing On/Off x\(count)")
+        for _ in 0..<count {
+            _ = set(.on)
+            Thread.sleep(forTimeInterval: gap)
+            _ = set(.off)
+            Thread.sleep(forTimeInterval: gap)
+        }
+        _ = set(.auto)
+        FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] done — \(count) blink(s), restored Auto")
+    }
+
+    private static func blinkViaModifierLockState(count: Int, gap: Double) throws {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(Self.ioHIDSystemClass))
+        guard service != 0 else {
+            throw BuiltInCapsLEDError(text: "IOHIDSystem service not found")
+        }
+        defer { IOObjectRelease(service) }
+        var connection: io_connect_t = 0
+        let kr = IOServiceOpen(service, mach_task_self_, Self.hidParamConnectType, &connection)
+        guard kr == KERN_SUCCESS else {
+            throw BuiltInCapsLEDError(text: "IOServiceOpen(IOHIDSystem) failed status=\(kr)")
+        }
+        defer { IOServiceClose(connection) }
+
+        var resting = false
+        let readKR = IOHIDGetModifierLockState(connection, Self.hidCapsLockState, &resting)
+        if readKR != KERN_SUCCESS {
+            FlashDiagnostics.note("flash: capsLock [modifierState] read status=\(readKR) (assuming off)")
+        }
+        FlashDiagnostics.note("flash: capsLock [modifierState] resting=\(resting) count=\(count)")
+        for _ in 0..<count {
+            IOHIDSetModifierLockState(connection, Self.hidCapsLockState, !resting)
+            Thread.sleep(forTimeInterval: gap)
+            IOHIDSetModifierLockState(connection, Self.hidCapsLockState, resting)
+            Thread.sleep(forTimeInterval: gap)
+        }
+        // Guarantee the resting state even if the loop's last write was lost.
+        IOHIDSetModifierLockState(connection, Self.hidCapsLockState, resting)
+        FlashDiagnostics.note("flash: capsLock [modifierState] done — \(count) blink(s), resting=\(resting) restored")
+    }
+
     /// Pulses the keyboard backlight, `count` times.
     func flashBacklight(count: Int) {
         queue.async {
-            let keyboards = Self.keyboards()
-            FlashDiagnostics.note("flash: backlight count=\(count) keyboards=\(keyboards.count)")
-            for keyboard in keyboards {
-                Self.pulseBacklight(keyboard: keyboard, count: count, gap: self.pulseGap)
-            }
+            Self.pulseBacklight(count: count, gap: self.pulseGap)
         }
     }
 
@@ -98,7 +250,16 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// back to it, so a blink is visible whether the LED starts on or off,
     /// and the loop ends at the resting state (a cycle never toggles Caps
     /// Lock on).
+    ///
+    /// The built-in keyboard is skipped here: its HID LED element write
+    /// returns `kIOReturnMethodNotSupported` (0xE00002CD) — the built-in LED
+    /// is driven by the `HIDCapsLockLED` / modifier-lock paths in
+    /// `blinkBuiltInCapsLED` instead.
     private static func blinkCapsLock(keyboard: IOHIDDevice, count: Int, gap: Double) {
+        if isBuiltIn(keyboard: keyboard) {
+            FlashDiagnostics.note("flash: capsLock skipping built-in keyboard on HID element path (handled via HIDCapsLockLED/modifier-lock)")
+            return
+        }
         let elements = matchingElements(on: keyboard, page: kHIDPage_LEDs, usage: kHIDUsage_LED_CapsLock)
         guard !elements.isEmpty else {
             FlashDiagnostics.note("flash: capsLock element NOT FOUND on this keyboard")
@@ -126,6 +287,15 @@ final class KeyboardFlasher: @unchecked Sendable {
         }
     }
 
+    /// True for the MacBook's built-in keyboard. Apple devices expose
+    /// `Product` = "Apple Internal Keyboard / Trackpad" (the `Built-In`
+    /// property lives on the HID *service*, not the device handle, so the
+    /// product name is the reliable device-level check).
+    private static func isBuiltIn(keyboard: IOHIDDevice) -> Bool {
+        let product = (IOHIDDeviceGetProperty(keyboard, kIOHIDProductKey as CFString) as? String) ?? ""
+        return product.contains("Apple Internal")
+    }
+
     /// Reads the current integer value of `element` on `keyboard`, or `nil`
     /// when the read fails. The placeholder is bound to a local so ARC keeps
     /// it alive across the call; if `IOHIDDeviceGetValue` installs a new
@@ -146,58 +316,94 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Pulses the keyboard backlight, `count` times, restoring the original
     /// level afterwards.
     ///
-    /// Backlight elements appear in different shapes depending on the
-    /// hardware, so several page/usage pairs are probed in order (the ordered
-    /// candidate list lives in `FlashMath.backlightCandidates`, which is unit
-    /// tested). The first candidate that matches an element wins. The two
-    /// levels of a pulse are decided by `FlashMath.backlightPulse`:
-    ///   - backlight on  -> dim to 0, restore to the original level;
-    ///   - backlight off -> blip up to a minimum visible level, back to 0.
-    /// Both are clamped to the element's maximum value, so no out-of-range
-    /// write is ever sent.
-    private static func pulseBacklight(keyboard: IOHIDDevice, count: Int, gap: Double) {
-        // Look candidates up in order and stop at the first one that matches
-        // an element (early break: built-in keyboards hit the Apple vendor
-        // page first, so the common case is a single lookup). The "first
-        // non-empty wins" selection is still the pure, unit-tested policy.
-        var found: [[IOHIDElement]] = []
-        for candidate in FlashMath.backlightCandidates {
-            let elements = matchingElements(on: keyboard, page: candidate.page, usage: candidate.usage)
-            found.append(elements)
-            if !elements.isEmpty { break }
-        }
-        guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
-              let element = found[index].first else {
-            FlashDiagnostics.note("flash: backlight element NOT FOUND (candidate counts: \(found.map(\.count)))")
+    /// The built-in keyboard's HID backlight element cannot be read reliably
+    /// (`readElement FAILED` — the element is an output element and its
+    /// "value" is managed by the LMU firmware), so the pulse is driven through
+    /// the **`AppleLMUController`** IOKit service instead (the same path used
+    /// by keyboardparty / maclight / macbook-brightness, all of which work on
+    /// Intel Macs):
+    ///   - selector 1 = get current LED brightness (0...0xFFF on 12-bit
+    ///     hardware; the read value is the scale ceiling);
+    ///   - selector 2 = set LED brightness (input [0, level]).
+    /// The current level is read first so it can be restored after the
+    /// pulse; a level of 0 means the backlight is off and the pulse blips up
+    /// to a minimum visible level and back. When `AppleLMUController` is
+    /// absent (e.g. an external-only setup) the channel no-ops and the log
+    /// says why. External RGB keyboards (Logitech etc.) are not driven here.
+    private static func pulseBacklight(count: Int, gap: Double) {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleLMUController"))
+        guard service != 0 else {
+            FlashDiagnostics.note("flash: backlight AppleLMUController NOT FOUND — skipped")
             return
         }
-
-        // Read the current level so it can be restored after the pulse; a
-        // failed read means we cannot restore, so skip (best-effort channel).
-        guard let original = readElement(keyboard: keyboard, element: element) else {
-            FlashDiagnostics.note("flash: backlight readElement FAILED (cannot restore, skipped)")
+        defer { IOObjectRelease(service) }
+        var connection: io_connect_t = 0
+        let openStatus = IOServiceOpen(service, mach_task_self_, 0, &connection)
+        guard openStatus == KERN_SUCCESS else {
+            FlashDiagnostics.note("flash: backlight IOServiceOpen FAILED status=\(openStatus) — skipped")
             return
         }
+        defer { IOServiceClose(connection) }
 
-        let maxValue = Int(IOHIDElementGetLogicalMax(element))
-        let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)
-        FlashDiagnostics.note("flash: backlight element found candidate=\(index) max=\(maxValue) original=\(original) pulseLevel=\(pulseLevel)")
-        guard FlashMath.backlightPulseVisible(original: original, maxValue: maxValue, pulseLevel: pulseLevel) else {
-            FlashDiagnostics.note("flash: backlight pulse not visible (skipped)")
+        func call(_ selector: UInt32, _ input: [UInt64]) -> UInt64? {
+            var input = input
+            var output: UInt64 = 0
+            var outputCount: UInt32 = 1
+            let kr = IOConnectCallScalarMethod(
+                connection, selector,
+                &input, UInt32(input.count),
+                &output, &outputCount
+            )
+            guard kr == KERN_SUCCESS else {
+                FlashDiagnostics.note("flash: backlight selector=\(selector) IOConnectCallScalarMethod FAILED status=\(kr)")
+                return nil
+            }
+            return output
+        }
+
+        guard let originalRaw = call(1, [0]) else { return }
+        // Blip level for the backlight-OFF case: use a fixed 25% of the
+        // assumed 12-bit maximum (0x1000) rather than the current level —
+        // when the backlight is off the read returns 0, and a blip of
+        // 1/4095 would be invisible. On 8-bit hardware the firmware clamps
+        // 1024 to 255 (full brightness), which is still a clear blip.
+        let blip = UInt64(FlashMath.backlightPulseLevel(maxValue: 0x1000))
+        let (pulseLevel, restoreLevel): (UInt64, UInt64)
+        if originalRaw > 0 {
+            // Backlight on: dim to 0, restore the original level.
+            pulseLevel = 0
+            restoreLevel = originalRaw
+        } else {
+            // Backlight off: blip up to a fixed visible level, back to 0.
+            pulseLevel = blip
+            restoreLevel = 0
+        }
+        if pulseLevel == restoreLevel {
+            FlashDiagnostics.note("flash: backlight pulse not visible (original=\(originalRaw)) — skipped")
             return
         }
-        let levels = FlashMath.backlightPulse(original: original, maxValue: maxValue, pulseLevel: pulseLevel)
-
+        FlashDiagnostics.note("flash: backlight count=\(count) original=\(originalRaw) pulse=\(pulseLevel) restore=\(restoreLevel)")
         for cycle in 0..<count {
-            let writeStatus = setElement(keyboard: keyboard, element: element, value: levels.set)
-            if cycle == 0 {
-                FlashDiagnostics.note("flash: backlight first write status=\(writeStatus) (0=success)")
+            let kr = call(2, [0, pulseLevel])
+            if cycle == 0 && kr == nil {
+                // Nothing has been written yet — leave the level unchanged.
+                return
             }
             Thread.sleep(forTimeInterval: gap)
-            _ = setElement(keyboard: keyboard, element: element, value: levels.restore)
+            let kr2 = call(2, [0, restoreLevel])
+            if cycle == 0 {
+                FlashDiagnostics.note("flash: backlight first write=\(kr2 == nil ? "FAILED" : "ok")")
+            }
             Thread.sleep(forTimeInterval: gap)
         }
-        FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent")
+        // Guaranteed final restore: a failed restore write in the last cycle
+        // must not leave the backlight dimmed.
+        let final = call(2, [0, restoreLevel])
+        if final == nil {
+            FlashDiagnostics.note("flash: backlight FINAL restore FAILED — may be left at pulse level")
+        } else {
+            FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent, level restored")
+        }
     }
 
     /// HID elements on `keyboard` with the given page and usage (any type).

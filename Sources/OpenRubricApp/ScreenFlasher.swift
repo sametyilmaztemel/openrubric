@@ -2,19 +2,30 @@
 import AppKit
 import CoreGraphics
 import Darwin
+import IOKit
 import OpenRubricCore
 
-/// Screen brightness pulses via CoreGraphics.
+/// Screen brightness pulses on the main (internal) display.
 ///
-/// `CGDisplayBrightness` / `CGDisplaySetDisplayBrightness` control the main
-/// (internal) display; external displays often ignore them, which matches
-/// the "main/internal display" scope in the issue. The pulse dims the
-/// display to a small fraction of its original level and restores it.
+/// Two mechanisms, tried in order (both best-effort, every outcome logged
+/// through `FlashDiagnostics`):
 ///
-/// These two functions are not consistently surfaced in the public
-/// CoreGraphics Swift module, so they are resolved by symbol name at load
-/// time. If the symbols are missing the channel is a silent no-op (the
-/// issue marks screen flash as best-effort).
+/// 1. **CoreDisplay private SPI** — `CoreDisplay_Display_GetUserBrightness`
+///    / `CoreDisplay_Display_SetUserBrightness` (0...1). These are the
+///    symbols that actually move the brightness slider (used by nriley/
+///    brightness, Crisp, lux). The old `CGDisplayBrightness` /
+///    `CGDisplaySetDisplayBrightness` names do not exist in CoreGraphics,
+///    so `dlsym(RTLD_DEFAULT, ...)` could never find them — that was why
+///    the channel was a silent no-op. The framework is loaded with
+///    `dlopen` and the symbols resolved at runtime, so nothing is linked
+///    against a private framework at build time.
+/// 2. **Public IOKit** — `IODisplayGetFloatParameter` /
+///    `IODisplaySetFloatParameter` on the `IODisplayConnect` service.
+///    Deprecated but still functional on Intel Macs; used when CoreDisplay
+///    is unavailable.
+///
+/// The pulse dims the display to a small fraction of its original level
+/// and restores it, `count` times.
 final class ScreenFlasher: @unchecked Sendable {
     /// Serial queue so a pulse in flight never collides with another.
     private let queue = DispatchQueue(label: "openrubric.screen")
@@ -23,61 +34,89 @@ final class ScreenFlasher: @unchecked Sendable {
     /// Dim level as a fraction of the original brightness.
     private let dimFraction: Double
 
-    /// `CGDisplayBrightness(display) -> CGFloat`, if the symbol resolved.
-    private let getBrightness: ((CGDirectDisplayID) -> CGFloat)?
-    /// `CGDisplaySetDisplayBrightness(display, level)`, if the symbol resolved.
-    private let setBrightness: ((CGDirectDisplayID, CGFloat) -> Void)?
+    /// CoreDisplay SPI, resolved at load time (nil when unavailable).
+    private let cdGet: ((CGDirectDisplayID) -> Double)?
+    private let cdSet: ((CGDirectDisplayID, Double) -> Void)?
+    /// IOKit `IODisplayConnect` service for the fallback path (0 = absent).
+    private let ioService: io_service_t
 
-    /// `RTLD_DEFAULT` is `((void *) -2)` on Darwin. The numeric value is
-    /// stored (it is `Sendable`) and the pointer handle is built locally at
-    /// each `dlsym` call, so no non-`Sendable` type lives in a static storage
-    /// slot under strict concurrency. This also avoids depending on the
-    /// `RTLD_DEFAULT` constant being visible in the Darwin module.
-    private static let rtldDefaultBitPattern: Int = -2
-    private static var rtldDefaultHandle: UnsafeMutableRawPointer {
-        UnsafeMutableRawPointer(bitPattern: Self.rtldDefaultBitPattern)!
-    }
+    private static let coreDisplayPath = "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay"
 
     init(pulseGap: Double = 0.25, dimFraction: Double = 0.15) {
         self.pulseGap = pulseGap
         self.dimFraction = dimFraction
 
-        let handle = Self.rtldDefaultHandle
-        var getter: ((CGDirectDisplayID) -> CGFloat)?
-        var setter: ((CGDirectDisplayID, CGFloat) -> Void)?
-        if let sym = dlsym(handle, "CGDisplayBrightness") {
-            getter = unsafeBitCast(sym, to: ((CGDirectDisplayID) -> CGFloat).self)
+        var get: ((CGDirectDisplayID) -> Double)?
+        var set: ((CGDirectDisplayID, Double) -> Void)?
+        if let handle = dlopen(Self.coreDisplayPath, RTLD_LAZY) {
+            if let sym = dlsym(handle, "CoreDisplay_Display_GetUserBrightness") {
+                get = unsafeBitCast(sym, to: ((CGDirectDisplayID) -> Double).self)
+            }
+            if let sym = dlsym(handle, "CoreDisplay_Display_SetUserBrightness") {
+                set = unsafeBitCast(sym, to: ((CGDirectDisplayID, Double) -> Void).self)
+            }
         }
-        if let sym = dlsym(handle, "CGDisplaySetDisplayBrightness") {
-            setter = unsafeBitCast(sym, to: ((CGDirectDisplayID, CGFloat) -> Void).self)
-        }
-        self.getBrightness = getter
-        self.setBrightness = setter
+        self.cdGet = get
+        self.cdSet = set
+
+        // The service is kept open for the app's lifetime (a retained
+        // service port is fine here; the app is a menu-bar utility).
+        self.ioService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"))
+
+        FlashDiagnostics.note(
+            "flash: screen init coreDisplay=\(get != nil && set != nil ? "ok" : "missing") iokit=\(self.ioService != 0 ? "ok" : "missing")"
+        )
     }
 
     /// Dims the main display and restores it, `count` times.
     func flash(count: Int) {
         queue.async {
-            guard let get = self.getBrightness, let set = self.setBrightness else {
-                FlashDiagnostics.note("flash: screen brightness symbols NOT resolved (silent no-op)")
+            let display = CGMainDisplayID()
+            let useCoreDisplay = self.cdGet != nil && self.cdSet != nil
+
+            // Read the current level through whichever mechanism is usable.
+            var original: Double?
+            var mechanism = "none"
+            if useCoreDisplay, let get = self.cdGet {
+                original = get(display)
+                mechanism = "CoreDisplay"
+            } else if self.ioService != 0 {
+                var v: Float = 0
+                // kIODisplayBrightnessKey == "brightness".
+                if IODisplayGetFloatParameter(self.ioService, 0, "brightness" as CFString, &v) == KERN_SUCCESS {
+                    original = Double(v)
+                    mechanism = "IOKit"
+                }
+            }
+            guard let original else {
+                FlashDiagnostics.note("flash: screen UNAVAILABLE (coreDisplay=\(useCoreDisplay ? "ok" : "missing"), iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
                 return
             }
-            let display = CGMainDisplayID()
-            let original = get(display)
-            FlashDiagnostics.note("flash: screen count=\(count) mainDisplay=\(display) brightness=\(original)")
-            guard FlashMath.screenFlashEnabled(original: original) else {
+            guard FlashMath.screenFlashEnabled(original: CGFloat(original)) else {
                 FlashDiagnostics.note("flash: screen already at 0 (skipped)")
                 return
             }
 
-            let dimmed = FlashMath.screenDimLevel(original: original, dimFraction: self.dimFraction)
-            FlashDiagnostics.note("flash: screen dimming to \(dimmed) and back, \(count) pulse(s)")
+            let dimmed = FlashMath.screenDimLevel(original: CGFloat(original), dimFraction: self.dimFraction)
+            FlashDiagnostics.note("flash: screen [\(mechanism)] count=\(count) brightness=\(original) dimming to \(dimmed)")
+
+            let apply: (Double) -> Void = { level in
+                if useCoreDisplay, let set = self.cdSet {
+                    set(display, level)
+                } else {
+                    _ = IODisplaySetFloatParameter(self.ioService, 0, "brightness" as CFString, Float(level))
+                }
+            }
             for _ in 0..<count {
-                set(display, dimmed)
+                apply(dimmed)
                 Thread.sleep(forTimeInterval: self.pulseGap)
-                set(display, original)
+                apply(original)
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
+            // Guaranteed final restore: a failed restore write in the last
+            // cycle must not leave the display dimmed.
+            apply(original)
+            FlashDiagnostics.note("flash: screen done — \(count) pulse(s) sent, level restored")
         }
     }
 }
