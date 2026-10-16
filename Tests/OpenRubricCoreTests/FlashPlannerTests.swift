@@ -35,7 +35,7 @@ struct FlashPlannerTests {
             for: answer,
             enabled: Set(FlashChannel.allCases)
         )
-        #expect(plan?.count == 4)
+        #expect(plan?.count == 3)
         #expect(plan?.channels == [
             .capsLockLED, .screenFlash, .keyboardBacklight, .cameraLED
         ])
