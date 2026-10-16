@@ -8,11 +8,14 @@ import OpenRubricCore
 final class FlashCoordinator: @unchecked Sendable {
     private let keyboard: KeyboardFlasher
     private let screen: ScreenFlasher
+    private let camera: CameraLEDFlasher
 
     init(keyboard: KeyboardFlasher = KeyboardFlasher(),
-         screen: ScreenFlasher = ScreenFlasher()) {
+         screen: ScreenFlasher = ScreenFlasher(),
+         camera: CameraLEDFlasher = CameraLEDFlasher()) {
         self.keyboard = keyboard
         self.screen = screen
+        self.camera = camera
     }
 
     /// Fires every channel in the plan. No-op for an empty plan.
@@ -26,6 +29,8 @@ final class FlashCoordinator: @unchecked Sendable {
                 keyboard.flashBacklight(count: plan.count)
             case .screenFlash:
                 screen.flash(count: plan.count)
+            case .cameraLED:
+                camera.flash(count: plan.count)
             }
         }
     }

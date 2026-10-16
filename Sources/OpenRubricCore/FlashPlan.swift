@@ -12,6 +12,9 @@ public enum FlashChannel: String, CaseIterable, Codable, Sendable {
     case screenFlash
     /// Keyboard backlight pulses (external keyboards vary; best-effort).
     case keyboardBacklight
+    /// Front camera LED blinks (SMC `LSOO`; best-effort, hardware-interlocked
+    /// when the camera is active).
+    case cameraLED
 }
 
 /// The plan for one flash: which channels fire and with what count.
