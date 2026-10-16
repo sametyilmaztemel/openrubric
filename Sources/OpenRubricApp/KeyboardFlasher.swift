@@ -103,39 +103,29 @@ final class KeyboardFlasher: @unchecked Sendable {
     private static let hidCapsLockState: Int32 = 1
 
     private static func blinkBuiltInCapsLED(count: Int, gap: Double) throws {
-        // Locate the built-in keyboard's HID service through the event system.
-        var client: IOHIDEventSystemClient?
-        var services: CFArray?
+        // Locate the built-in keyboard's HID service through the event
+        // system. (The IOKit Swift overlay manages CF objects with ARC —
+        // no CFRelease needed here.)
         var builtIn: IOHIDServiceClient?
-        if let c = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault) {
-            client = c
-            if let s = IOHIDEventSystemClientCopyServices(c) {
-                services = s
-                let n = CFArrayGetCount(s)
-                for i in 0..<n {
-                    guard let raw = CFArrayGetValueAtIndex(s, i) else { continue }
-                    let service = unsafeBitCast(raw, to: IOHIDServiceClient.self)
-                    // GenericDesktop (0x01) / Keyboard (0x06).
-                    guard IOHIDServiceClientConformsTo(service, 0x01, 0x06) != 0 else { continue }
-                    if let flag = IOHIDServiceClientCopyProperty(service, "Built-In" as CFString) {
-                        CFRelease(flag)
-                        if (flag as? NSNumber)?.boolValue == true {
-                            builtIn = service
-                            break
-                        }
-                    }
+        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+        if let services = IOHIDEventSystemClientCopyServices(client) {
+            let n = CFArrayGetCount(services)
+            for i in 0..<n {
+                guard let raw = CFArrayGetValueAtIndex(services, i) else { continue }
+                let service = unsafeBitCast(raw, to: IOHIDServiceClient.self)
+                // GenericDesktop (0x01) / Keyboard (0x06).
+                guard IOHIDServiceClientConformsTo(service, 0x01, 0x06) != 0 else { continue }
+                if let flag = IOHIDServiceClientCopyProperty(service, "Built-In" as CFString),
+                   (flag as? NSNumber)?.boolValue == true {
+                    builtIn = service
+                    break
                 }
             }
-        }
-        defer {
-            if let s = services { CFRelease(s) }
-            if let c = client { CFRelease(c) }
         }
 
         // Path 1: HIDCapsLockLED property (feature-detect by read).
         if let target = builtIn {
-            if let probe = IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) {
-                CFRelease(probe)
+            if IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) != nil {
                 try blinkViaCapsLEDProperty(target, count: count, gap: gap)
                 return
             }
