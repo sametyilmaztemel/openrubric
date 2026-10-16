@@ -121,6 +121,40 @@ struct FlashMathTests {
         }
     }
 
+    @Suite("camera LED pulse")
+    struct CameraLED {
+        @Test("camera off (resting 0): blip up to 1, restore to 0")
+        func off() {
+            let p = FlashMath.cameraLEDPulse(resting: 0)
+            #expect(p.set == 1)
+            #expect(p.restore == 0)
+        }
+
+        @Test("camera on (resting 1): dip to 0, restore to 1")
+        func on() {
+            let p = FlashMath.cameraLEDPulse(resting: 1)
+            #expect(p.set == 0)
+            #expect(p.restore == 1)
+        }
+
+        @Test("out-of-range resting values clamp to a valid on/off pair")
+        func clamped() {
+            #expect(FlashMath.cameraLEDPulse(resting: 5).set == 0)
+            #expect(FlashMath.cameraLEDPulse(resting: 5).restore == 1)
+            #expect(FlashMath.cameraLEDPulse(resting: -1).set == 1)
+            #expect(FlashMath.cameraLEDPulse(resting: -1).restore == 0)
+        }
+
+        @Test("the set level always differs from the resting state (a visible toggle)")
+        func differsFromResting() {
+            for resting in [0, 1] {
+                let p = FlashMath.cameraLEDPulse(resting: resting)
+                #expect(p.set != p.restore)
+                #expect(p.restore == resting)
+            }
+        }
+    }
+
     @Suite("backlight pulse level")
     struct PulseLevel {
         @Test("pulse level is a quarter of the max, min 1 when there is headroom")

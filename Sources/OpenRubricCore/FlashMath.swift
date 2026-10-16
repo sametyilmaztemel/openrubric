@@ -39,6 +39,27 @@ public enum FlashMath {
         original > 0
     }
 
+    // MARK: - Camera (front) LED
+
+    /// The (set, restore) byte pair for one camera-LED pulse, driven through
+    /// the SMC `LSOO` key (1 = lit, 0 = off).
+    ///
+    /// The camera LED is an on/off byte, so "flash N times" is an inverse
+    /// pulse, exactly like the Caps Lock LED: a resting state of 0 blips up
+    /// to 1 and back; a resting state of 1 dips to 0 and back. The result
+    /// ends at the resting state, so a cycle never leaves the LED in the
+    /// opposite position. Both levels are clamped to `0...1` so only a valid
+    /// on/off byte is ever written to the SMC.
+    ///
+    /// Best-effort note: on modern Macs the LED is hardware-interlocked to
+    /// the camera sensor, so when the camera is genuinely active the SMC
+    /// write may be overridden — the caller treats the channel as best-effort
+    /// and the diagnostic log records the write result.
+    public static func cameraLEDPulse(resting: Int) -> (set: Int, restore: Int) {
+        let r = min(max(resting, 0), 1)
+        return (set: 1 - r, restore: r)
+    }
+
     // MARK: - Keyboard backlight
 
     /// A HID page/usage pair to probe for a backlight element. Exposed as

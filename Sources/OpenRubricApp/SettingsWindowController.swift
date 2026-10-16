@@ -21,6 +21,7 @@ final class SettingsWindowController: NSWindowController {
     private let ledToggle = NSButton(checkboxWithTitle: "Caps Lock LED blinks (A=1…D=4)", target: nil, action: nil)
     private let screenFlashToggle = NSButton(checkboxWithTitle: "Screen brightness pulses", target: nil, action: nil)
     private let backlightToggle = NSButton(checkboxWithTitle: "Keyboard backlight pulses", target: nil, action: nil)
+    private let cameraLEDToggle = NSButton(checkboxWithTitle: "Camera LED blinks (green, top)", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
 
     init(store: AppSettingsStore) {
@@ -65,6 +66,7 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(ledToggle)
         stack.addArrangedSubview(screenFlashToggle)
         stack.addArrangedSubview(backlightToggle)
+        stack.addArrangedSubview(cameraLEDToggle)
 
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -129,6 +131,7 @@ final class SettingsWindowController: NSWindowController {
         ledToggle.state = settings.flashChannels.contains(.capsLockLED) ? .on : .off
         screenFlashToggle.state = settings.flashChannels.contains(.screenFlash) ? .on : .off
         backlightToggle.state = settings.flashChannels.contains(.keyboardBacklight) ? .on : .off
+        cameraLEDToggle.state = settings.flashChannels.contains(.cameraLED) ? .on : .off
 
         providerPicker.target = self
         providerPicker.action = #selector(providerChanged)
@@ -153,6 +156,7 @@ final class SettingsWindowController: NSWindowController {
         if ledToggle.state == .on { channels.insert(.capsLockLED) }
         if screenFlashToggle.state == .on { channels.insert(.screenFlash) }
         if backlightToggle.state == .on { channels.insert(.keyboardBacklight) }
+        if cameraLEDToggle.state == .on { channels.insert(.cameraLED) }
         let newSettings = OpenRubricSettings(
             apiProvider: provider,
             baseURL: baseURLField.stringValue,
