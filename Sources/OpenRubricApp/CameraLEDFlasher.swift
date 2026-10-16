@@ -196,9 +196,10 @@ final class CameraLEDFlasher: @unchecked Sendable {
         // Capture-fallback timing: the camera PMIC enforces a ~3s minimum LED
         // on-time after the sensor powers down (hardware interlock), so the
         // off-phase must exceed that for the blink to be *visible* as on-then-
-        // off. 3.0s on triggers the LED; 4.0s off lets it fully decay. Slower
-        // than the SMC path but reliable on hardware where LSOO is absent.
-        self.captureOn = 3.0
+        // off. 3.5s on covers hardware where the minimum is slightly above
+        // 3s; 4.0s off lets the LED fully decay. Slower than the SMC path but
+        // reliable on hardware where LSOO is absent.
+        self.captureOn = 3.5
         self.captureOff = 4.0
     }
 

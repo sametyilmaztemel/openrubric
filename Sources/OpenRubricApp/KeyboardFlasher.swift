@@ -337,15 +337,19 @@ final class KeyboardFlasher: @unchecked Sendable {
         }
 
         guard let originalRaw = call(1, [0]) else { return }
-        let scale = Int(max(originalRaw, 1))
-        let blip = UInt64(FlashMath.backlightPulseLevel(maxValue: scale))
+        // Blip level for the backlight-OFF case: use a fixed 25% of the
+        // assumed 12-bit maximum (0x1000) rather than the current level —
+        // when the backlight is off the read returns 0, and a blip of
+        // 1/4095 would be invisible. On 8-bit hardware the firmware clamps
+        // 1024 to 255 (full brightness), which is still a clear blip.
+        let blip = UInt64(FlashMath.backlightPulseLevel(maxValue: 0x1000))
         let (pulseLevel, restoreLevel): (UInt64, UInt64)
         if originalRaw > 0 {
             // Backlight on: dim to 0, restore the original level.
             pulseLevel = 0
             restoreLevel = originalRaw
         } else {
-            // Backlight off: blip up to a minimum visible level, back to 0.
+            // Backlight off: blip up to a fixed visible level, back to 0.
             pulseLevel = blip
             restoreLevel = 0
         }
