@@ -167,6 +167,15 @@ enum SMC {
         request.bytes.0 = UInt8(min(max(value, 0), 1))
         _ = try call(connection, request)
     }
+
+    /// Writes `value` and reads the key back, returning the observed state.
+    /// Used for read-back verification: if the returned value equals the
+    /// pre-write resting state, the write was not observable (read-only or a
+    /// state-mirror key) even though the SMC accepted it.
+    static func readValueAfterWrite(connection: io_connect_t, size: UInt32, value: Int) throws -> Int {
+        try writeValue(connection: connection, size: size, value: value)
+        return try readValue(connection: connection, size: size)
+    }
 }
 
 /// Drives the front camera LED, `count` times, via two mechanisms:
@@ -237,6 +246,21 @@ final class CameraLEDFlasher: @unchecked Sendable {
             let resting = try SMC.readValue(connection: connection, size: info.size)
             FlashDiagnostics.note("flash: cameraLED [SMC] resting=\(resting) count=\(count)")
             let levels = FlashMath.cameraLEDPulse(resting: resting)
+            // Read-back verification: the SMC write is only trusted if a
+            // re-read shows the value actually changed. On some machines
+            // (e.g. Apple Silicon) `LSOO` is present but read-only or a state
+            // mirror — the write "succeeds" but the LED never moves. Verifying
+            // here means the capture fallback (hardware-tied, works both
+            // arches) runs instead of a silent no-op.
+            guard let probe = try? SMC.readValueAfterWrite(connection, size: info.size, value: levels.set),
+                  probe != resting else {
+                // Restore best-effort, then report 0 so the caller falls back.
+                try? SMC.writeValue(connection: connection, size: info.size, value: resting)
+                FlashDiagnostics.note("flash: cameraLED [SMC] write not observable (LSOO read-only/mirror?) — will use capture fallback")
+                return 0
+            }
+            // Verified: the write moved the value. Restore it before the loop.
+            try? SMC.writeValue(connection: connection, size: info.size, value: resting)
             var done = 0
             for _ in 0..<count {
                 do {
