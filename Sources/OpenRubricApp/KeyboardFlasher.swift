@@ -156,8 +156,9 @@ final class KeyboardFlasher: @unchecked Sendable {
             IOHIDServiceClientSetProperty(target, "HIDCapsLockLED" as CFString, mode.rawValue as NSString)
         }
         func read() -> String? {
-            guard let value = IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) else { return nil }
-            return (value as? NSString)?.utf8String
+            guard let value = IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString),
+                  let str = value as? NSString else { return nil }
+            return str as String
         }
         guard set(.auto) else {
             throw BuiltInCapsLEDError(text: "HIDCapsLockLED write rejected")
