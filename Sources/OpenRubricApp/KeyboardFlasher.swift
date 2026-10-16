@@ -104,15 +104,21 @@ final class KeyboardFlasher: @unchecked Sendable {
 
     private static func blinkBuiltInCapsLED(count: Int, gap: Double) throws {
         // Locate the built-in keyboard's HID service through the event
-        // system. (The IOKit Swift overlay manages CF objects with ARC —
-        // no CFRelease needed here.)
-        var builtIn: IOHIDServiceClient?
+        // system. The services array must outlive every use of `builtIn`
+        // (its elements are owned by the array), so it stays in function
+        // scope rather than an inner `if let` block.
         let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-        if let services = IOHIDEventSystemClientCopyServices(client) {
+        let services = IOHIDEventSystemClientCopyServices(client)
+
+        var builtIn: IOHIDServiceClient?
+        if let services {
             let n = CFArrayGetCount(services)
             for i in 0..<n {
                 guard let raw = CFArrayGetValueAtIndex(services, i) else { continue }
-                let service = unsafeBitCast(raw, to: IOHIDServiceClient.self)
+                // takeUnretainedValue (not unsafeBitCast to the class type):
+                // the element is owned by `services`, and a class-typed cast
+                // would make ARC emit a phantom release on the local.
+                let service = Unmanaged<IOHIDServiceClient>.fromOpaque(raw).takeUnretainedValue()
                 // GenericDesktop (0x01) / Keyboard (0x06).
                 guard IOHIDServiceClientConformsTo(service, 0x01, 0x06) != 0 else { continue }
                 if let flag = IOHIDServiceClientCopyProperty(service, "Built-In" as CFString),
@@ -123,13 +129,20 @@ final class KeyboardFlasher: @unchecked Sendable {
             }
         }
 
-        // Path 1: HIDCapsLockLED property (feature-detect by read).
+        // Path 1: HIDCapsLockLED property (feature-detect by read, verified
+        // by write + read-back inside blinkViaCapsLEDProperty). Any failure
+        // falls through to path 2 instead of skipping the built-in LED.
         if let target = builtIn {
             if IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) != nil {
-                try blinkViaCapsLEDProperty(target, count: count, gap: gap)
-                return
+                do {
+                    try blinkViaCapsLEDProperty(target, count: count, gap: gap)
+                    return
+                } catch {
+                    FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] failed: \(error) — using modifier-lock state")
+                }
+            } else {
+                FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] property not supported on this OS — using modifier-lock state")
             }
-            FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] property not supported on this OS — using modifier-lock state")
         } else {
             FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] no built-in keyboard service — using modifier-lock state")
         }
@@ -142,8 +155,19 @@ final class KeyboardFlasher: @unchecked Sendable {
         func set(_ mode: CapsLEDMode) -> Bool {
             IOHIDServiceClientSetProperty(target, "HIDCapsLockLED" as CFString, mode.rawValue as NSString)
         }
+        func read() -> String? {
+            guard let value = IOHIDServiceClientCopyProperty(target, "HIDCapsLockLED" as CFString) else { return nil }
+            return (value as? NSString)?.utf8String
+        }
         guard set(.auto) else {
             throw BuiltInCapsLEDError(text: "HIDCapsLockLED write rejected")
+        }
+        // Write + read-back verification: a property that accepts writes but
+        // does not actually move the LED would silently win this path and
+        // never fall through to the modifier-lock mechanism.
+        guard set(.on), read() == "On" else {
+            _ = set(.auto)
+            throw BuiltInCapsLEDError(text: "HIDCapsLockLED write not observable (read-back mismatch)")
         }
         FlashDiagnostics.note("flash: capsLock [HIDCapsLockLED] built-in service found, writing On/Off x\(count)")
         for _ in 0..<count {
@@ -360,7 +384,10 @@ final class KeyboardFlasher: @unchecked Sendable {
         FlashDiagnostics.note("flash: backlight count=\(count) original=\(originalRaw) pulse=\(pulseLevel) restore=\(restoreLevel)")
         for cycle in 0..<count {
             let kr = call(2, [0, pulseLevel])
-            if cycle == 0 && kr == nil { return }
+            if cycle == 0 && kr == nil {
+                // Nothing has been written yet — leave the level unchanged.
+                return
+            }
             Thread.sleep(forTimeInterval: gap)
             let kr2 = call(2, [0, restoreLevel])
             if cycle == 0 {
@@ -368,7 +395,14 @@ final class KeyboardFlasher: @unchecked Sendable {
             }
             Thread.sleep(forTimeInterval: gap)
         }
-        FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent")
+        // Guaranteed final restore: a failed restore write in the last cycle
+        // must not leave the backlight dimmed.
+        let final = call(2, [0, restoreLevel])
+        if final == nil {
+            FlashDiagnostics.note("flash: backlight FINAL restore FAILED — may be left at pulse level")
+        } else {
+            FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent, level restored")
+        }
     }
 
     /// HID elements on `keyboard` with the given page and usage (any type).

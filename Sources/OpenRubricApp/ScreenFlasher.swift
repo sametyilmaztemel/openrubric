@@ -113,7 +113,10 @@ final class ScreenFlasher: @unchecked Sendable {
                 apply(original)
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
-            FlashDiagnostics.note("flash: screen done — \(count) pulse(s) sent")
+            // Guaranteed final restore: a failed restore write in the last
+            // cycle must not leave the display dimmed.
+            apply(original)
+            FlashDiagnostics.note("flash: screen done — \(count) pulse(s) sent, level restored")
         }
     }
 }

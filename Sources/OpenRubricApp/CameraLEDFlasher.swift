@@ -204,11 +204,20 @@ final class CameraLEDFlasher: @unchecked Sendable {
     }
 
     /// Blinks the front camera LED `count` times (SMC first, capture fallback).
+    ///
+    /// The capture fallback runs only when the SMC path could not deliver any
+    /// blink (service/key absent, or the very first write failed). When SMC
+    /// blinks delivered but a later write failed, `flashViaSMC` has already
+    /// restored the resting state best-effort, so flashing again through the
+    /// slow capture path would just double the signal.
     func flash(count: Int) {
         queue.async {
             do {
-                try self.flashViaSMC(count: count)
-                return
+                let delivered = try self.flashViaSMC(count: count)
+                if delivered > 0 || count == 0 {
+                    return
+                }
+                FlashDiagnostics.note("flash: cameraLED SMC delivered 0 blink(s) — trying capture fallback")
             } catch {
                 FlashDiagnostics.note("flash: cameraLED SMC unavailable (\(error)) — trying capture fallback")
             }
@@ -216,22 +225,38 @@ final class CameraLEDFlasher: @unchecked Sendable {
         }
     }
 
-    /// Fast path: read the resting state once, then pulse its inverse `count`
-    /// times on a single SMC connection, always ending at the resting state.
-    private func flashViaSMC(count: Int) throws {
-        try SMC.withConnection { connection in
+    /// Fast path: read the resting state once, then pulse its inverse on a
+    /// single SMC connection. Returns the number of blinks actually
+    /// delivered. A mid-loop write failure restores the resting state
+    /// best-effort and stops (the LED must never be left stuck on the
+    /// inverse); it only throws when the channel was unavailable before any
+    /// blink was written.
+    private func flashViaSMC(count: Int) throws -> Int {
+        let delivered = try SMC.withConnection { connection in
             let info = try SMC.keyInfo(connection: connection)
             let resting = try SMC.readValue(connection: connection, size: info.size)
             FlashDiagnostics.note("flash: cameraLED [SMC] resting=\(resting) count=\(count)")
             let levels = FlashMath.cameraLEDPulse(resting: resting)
+            var done = 0
             for _ in 0..<count {
-                try SMC.writeValue(connection: connection, size: info.size, value: levels.set)
-                Thread.sleep(forTimeInterval: self.pulseGap)
-                try SMC.writeValue(connection: connection, size: info.size, value: levels.restore)
+                do {
+                    try SMC.writeValue(connection: connection, size: info.size, value: levels.set)
+                    Thread.sleep(forTimeInterval: self.pulseGap)
+                    try SMC.writeValue(connection: connection, size: info.size, value: levels.restore)
+                    done += 1
+                } catch {
+                    // Restore the resting state so the LED never sticks on
+                    // the inverse after a failed write.
+                    try? SMC.writeValue(connection: connection, size: info.size, value: resting)
+                    FlashDiagnostics.note("flash: cameraLED [SMC] write failed after \(done) blink(s): \(error) — restored best-effort")
+                    break
+                }
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
-            FlashDiagnostics.note("flash: cameraLED [SMC] done — \(count) blink(s)")
+            return done
         }
+        FlashDiagnostics.note("flash: cameraLED [SMC] done — \(delivered) blink(s)")
+        return delivered
     }
 
     /// Fallback path: power the camera sensor on/off `count` times; the
