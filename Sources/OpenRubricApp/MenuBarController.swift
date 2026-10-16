@@ -41,6 +41,10 @@ final class MenuBarController: NSObject {
         help.keyEquivalentModifierMask = [.command]
         help.target = self
         menu.addItem(help)
+        let flashLog = NSMenuItem(title: "Flash Log…", action: #selector(showFlashLog), keyEquivalent: "l")
+        flashLog.keyEquivalentModifierMask = [.command]
+        flashLog.target = self
+        menu.addItem(flashLog)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -139,6 +143,50 @@ final class MenuBarController: NSObject {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    /// Shows the tail of the flash diagnostics file so the user can see what
+    /// happened without a terminal or `log --private` (Monterey redacts NSLog
+    /// bodies as `<private>`).
+    ///
+    /// Unlike the answer panel (a non-activating `NSPanel` that must never
+    /// steal focus from the exam), this is an on-demand diagnostic the user
+    /// opens from the menu bar — so the app is activated to bring the alert to
+    /// the front and make it readable; focus returns when the alert is
+    /// dismissed.
+    @objc private func showFlashLog() {
+        let tail = FlashDiagnostics.lastLines(30)
+        let alert = NSAlert()
+        alert.messageText = "Flash Log (last 30 lines)"
+        alert.informativeText = "Full file: ~/Library/Application Support/OpenRubric/flash.log"
+        alert.accessoryView = makeLogTextView(tail)
+        alert.addButton(withTitle: "Reveal in Finder")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn, let url = Self.flashLogURL() {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    /// A scrollable, monospaced text view sized for the alert, so the full
+    /// tail is readable rather than truncated in `informativeText`.
+    private func makeLogTextView(_ text: String) -> NSScrollView {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 280))
+        scroll.hasVerticalScroller = true
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isRichText = false
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.string = text
+        scroll.documentView = textView
+        return scroll
+    }
+
+    /// The flash log file path, reusing `FlashDiagnostics.url` so "Reveal in
+    /// Finder" and the log writer never disagree on the location.
+    private static func flashLogURL() -> URL? {
+        FlashDiagnostics.url
     }
 
     private enum Badge { case idle, working, answered, error }

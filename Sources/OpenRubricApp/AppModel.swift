@@ -117,12 +117,13 @@ final class AppModel {
                 let parsed = AnswerParser.parse(result.text, mode: .init(promptMode: settings.promptMode))
                 panel.show(parsed, nearCursor: cursor)
                 recordHistory(result: result, parsed: parsed, model: settings.model)
-                NSLog("OpenRubric cycle: parsed letter=\(parsed.letter ?? "nil") text=\(parsed.text.prefix(20)) enabledChannels=\(settings.flashChannels.map(\.rawValue).sorted())")
+                let enabledChannels = settings.flashChannels.map(\.rawValue).sorted()
+                FlashDiagnostics.note("cycle: parsed letter=\(parsed.letter ?? "nil") text=\(parsed.text.prefix(20)) enabledChannels=\(enabledChannels)")
                 if let plan = FlashPlanner.plan(for: parsed, enabled: settings.flashChannels) {
-                    NSLog("OpenRubric cycle: flashing plan count=\(plan.count) channels=\(plan.channels.map(\.rawValue).sorted())")
+                    FlashDiagnostics.note("cycle: flashing plan count=\(plan.count) channels=\(plan.channels.map(\.rawValue).sorted())")
                     flash.flash(plan)
                 } else {
-                    NSLog("OpenRubric cycle: NO flash plan (letter nil or no enabled channel)")
+                    FlashDiagnostics.note("cycle: NO flash plan (letter nil or no enabled channel)")
                 }
                 setPhase(.presenting)
             } catch {
