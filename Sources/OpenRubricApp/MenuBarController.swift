@@ -147,8 +147,13 @@ final class MenuBarController: NSObject {
 
     /// Shows the tail of the flash diagnostics file so the user can see what
     /// happened without a terminal or `log --private` (Monterey redacts NSLog
-    /// bodies as `<private>`). Read-only and non-activating, so it never
-    /// steals focus from the exam.
+    /// bodies as `<private>`).
+    ///
+    /// Unlike the answer panel (a non-activating `NSPanel` that must never
+    /// steal focus from the exam), this is an on-demand diagnostic the user
+    /// opens from the menu bar — so the app is activated to bring the alert to
+    /// the front and make it readable; focus returns when the alert is
+    /// dismissed.
     @objc private func showFlashLog() {
         let tail = FlashDiagnostics.lastLines(30)
         let alert = NSAlert()
@@ -178,11 +183,10 @@ final class MenuBarController: NSObject {
         return scroll
     }
 
+    /// The flash log file path, reusing `FlashDiagnostics.url` so "Reveal in
+    /// Finder" and the log writer never disagree on the location.
     private static func flashLogURL() -> URL? {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("OpenRubric", isDirectory: true)
-            ?? FileManager.default.temporaryDirectory
-        return dir.appendingPathComponent("flash.log")
+        FlashDiagnostics.url
     }
 
     private enum Badge { case idle, working, answered, error }

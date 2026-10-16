@@ -29,6 +29,12 @@ enum FlashDiagnostics {
     /// is best-effort by design.
     static func note(_ message: String) {
         let line = "\(Self.timestamp()) OpenRubric: \(message)\n"
+        // A failed write is not worth surfacing: encode first and skip rather
+        // than force-unwrap, because `data(using: .utf8)` returns nil for a
+        // string with unpaired surrogates (which can reach here from LLM
+        // output via `parsed.text.prefix(20)`), and a crash on the log queue
+        // would break the flash cycle this class exists to support.
+        guard let data = line.data(using: .utf8) else { return }
         queue.async {
             do {
                 let fm = FileManager.default
@@ -38,9 +44,9 @@ enum FlashDiagnostics {
                     let handle = try FileHandle(forWritingTo: Self.url)
                     defer { try? handle.close() }
                     try handle.seekToEnd()
-                    try handle.write(contentsOf: line.data(using: .utf8)!)
+                    handle.write(data)
                 } else {
-                    try line.write(to: Self.url, atomically: true, encoding: .utf8)
+                    try data.write(to: Self.url, options: .atomic)
                 }
             } catch {
                 // Best-effort: a write failure is not worth surfacing here.
