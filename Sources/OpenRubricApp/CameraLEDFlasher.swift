@@ -113,7 +113,8 @@ enum SMC {
 
     /// The key's payload size and whether it is present on this machine.
     /// `nil` when the `AppleSMC` service is missing or the key is unknown.
-    static func cameraLEDKeyInfo() -> (size: UInt32)? {
+    /// Typed as `IOByteCount` to match `SMCParamStruct.keyInfo.dataSize`.
+    static func cameraLEDKeyInfo() -> IOByteCount? {
         do {
             return try withConnection { connection in
                 var request = SMCParamStruct()
