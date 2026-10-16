@@ -1,28 +1,48 @@
 #if os(macOS)
 import AppKit
+import AVFoundation
 import IOKit
 import OpenRubricCore
 
 /// Minimal AppleSMC user-space client.
 ///
 /// Talks to the `AppleSMC` kernel service through `IOConnectCallStructMethod`
-/// using the kernel's `SMCParamStruct` layout (80 bytes) — the same technique
-/// used by `xline`/`SMCKit` for the front camera LED. No entitlement, no
-/// privileged helper, no subprocess: `IOServiceGetMatchingService` and
-/// `IOServiceOpen` are public, and the front LED is driven by a single-byte
-/// key (`LSOO`).
+/// using the kernel's `SMCParamStruct` layout (canonical 80 bytes — verified
+/// byte-for-byte against the Apple pmconfigd C layout and the C compiler).
+/// No entitlement, no privileged helper, no subprocess: `IOServiceGetMatchingService`
+/// and `IOServiceOpen` are public.
 ///
-/// The SMC key set is not a documented Apple interface — it is observed
-/// behaviour. Reads are two-step (`kSMCGetKeyInfo` for size/type, then
-/// `kSMCReadKey`); a read that skips the info step and assumes a type is the
-/// classic SMC bug, so we never do that.
+/// Reads are two-step (`kSMCGetKeyInfo` for size/type, then `kSMCReadKey`);
+/// a read that skips the info step is the classic SMC bug, so we never do it.
+/// Every failure mode is surfaced as a distinct `SMCError` with a human-
+/// readable description, so the diagnostic log tells us *exactly* why the
+/// camera-LED key is unavailable on a given machine.
 enum SMC {
-    enum SMCError: Error {
+    enum SMCError: Error, CustomStringConvertible {
         case serviceNotFound
         case openFailed(kern_return_t)
         case callFailed(kern_return_t)
+        case keyNotFound
         case smcResult(UInt8)
         case unexpectedLayout(Int)
+
+        var description: String {
+            switch self {
+            case .serviceNotFound:
+                return "AppleSMC service not found"
+            case .openFailed(let kr):
+                return "IOServiceOpen failed (kern \(kr))"
+            case .callFailed(let kr):
+                return "IOConnectCallStructMethod failed (kern \(kr))"
+            case .keyNotFound:
+                return "LSOO key not found on this machine (dataSize 0)"
+            case .smcResult(let r):
+                let hint = (r == 132) ? " — LSOO key not found" : ""
+                return "SMC rejected (code \(r))\(hint)"
+            case .unexpectedLayout(let s):
+                return "SMC struct is \(s) bytes, expected 80"
+            }
+        }
     }
 
     private struct SMCVersion {
@@ -43,13 +63,11 @@ enum SMC {
 
     private struct SMCKeyInfoData {
         // Canonical C layout (informationsea/smc smc.h, Apple's original
-        // pmconfigd): `dataSize` is a UInt32 here, NOT IOByteCount/UInt64.
-        // The beltex/SMCKit variant (IOByteCount + a trailing `padding` field)
-        // lays out at 96 bytes and fails its own stride==80 assert on modern
-        // Swift (beltex/SMCKit issue #49); with the UInt32 layout and no
-        // padding field the whole struct is exactly 80 bytes with the
-        // canonical offsets (dataSize@28, result@40, data8@42, data32@44,
-        // bytes@48), which is what the AppleSMC driver expects.
+        // pmconfigd): `dataSize` is a UInt32, NOT IOByteCount/UInt64. With
+        // this type and no trailing padding field the whole struct is exactly
+        // 80 bytes (dataSize@28, result@40, data8@42, data32@44, bytes@48) —
+        // the beltex/SMCKit IOByteCount variant lays out at 96 bytes and
+        // fails its own stride==80 assert (their issue #49).
         var dataSize: UInt32 = 0
         var dataType: UInt32 = 0
         var dataAttributes: UInt8 = 0
@@ -58,8 +76,6 @@ enum SMC {
     // 80-byte layout, mirroring the kernel SMCParamStruct (canonical C above).
     // Order and types matter: the driver copies this struct by size, and the
     // whole struct must be exactly 80 bytes (asserted in `withConnection`).
-    // There is no explicit padding field — the 1-byte `dataAttributes` leaves
-    // the alignment to the compiler, reproducing the C layout exactly.
     // `bytes` is the data payload; the SMC reports its real size via
     // keyInfo.dataSize, so we only read/write the first bytes.
     private struct SMCParamStruct {
@@ -94,7 +110,7 @@ enum SMC {
     }
 
     /// Runs `body` with an open SMC connection, closing it afterwards.
-    private static func withConnection<T>(_ body: (io_connect_t) throws -> T) throws -> T {
+    static func withConnection<T>(_ body: (io_connect_t) throws -> T) throws -> T {
         guard MemoryLayout<SMCParamStruct>.stride == 80 else {
             throw SMCError.unexpectedLayout(MemoryLayout<SMCParamStruct>.stride)
         }
@@ -120,104 +136,145 @@ enum SMC {
         return output
     }
 
-    /// The key's payload size and whether it is present on this machine.
-    /// `nil` when the `AppleSMC` service is missing or the key is unknown.
-    /// Typed as `UInt32` to match `SMCParamStruct.keyInfo.dataSize`.
-    static func cameraLEDKeyInfo() -> UInt32? {
-        do {
-            return try withConnection { connection in
-                var request = SMCParamStruct()
-                request.key = lsOOKey
-                request.data8 = kSMCGetKeyInfo
-                let reply = try call(connection, request)
-                return reply.keyInfo.dataSize
-            }
-        } catch {
-            return nil
-        }
+    /// The key's payload size and data type. Throws `keyNotFound`/`smcResult`
+    /// when the key is absent on this machine.
+    static func keyInfo(connection: io_connect_t) throws -> (size: UInt32, type: UInt32) {
+        var request = SMCParamStruct()
+        request.key = lsOOKey
+        request.data8 = kSMCGetKeyInfo
+        let reply = try call(connection, request)
+        guard reply.keyInfo.dataSize >= 1 else { throw SMCError.keyNotFound }
+        return (reply.keyInfo.dataSize, reply.keyInfo.dataType)
     }
 
-    /// Reads the front camera LED's current on/off state, or `nil` when it
-    /// cannot be read (service missing, key unknown, or not privileged).
-    static func readCameraLED() -> Int? {
-        guard let size = cameraLEDKeyInfo() else { return nil }
-        do {
-            return try withConnection { connection -> Int in
-                var request = SMCParamStruct()
-                request.key = lsOOKey
-                request.data8 = kSMCReadKey
-                request.keyInfo.dataSize = size
-                let reply = try call(connection, request)
-                return Int(reply.bytes.0)
-            }
-        } catch {
-            return nil
-        }
+    /// Reads the current LED state (0/1) using an already-validated size.
+    static func readValue(connection: io_connect_t, size: UInt32) throws -> Int {
+        var request = SMCParamStruct()
+        request.key = lsOOKey
+        request.data8 = kSMCReadKey
+        request.keyInfo.dataSize = size
+        let reply = try call(connection, request)
+        return Int(reply.bytes.0)
     }
 
-    /// Writes the front camera LED on/off state. Returns `true` when the SMC
-    /// accepted the write. Best-effort: a `nil`/`false` means the channel is
-    /// unavailable (logged by the caller), never a crash.
-    @discardableResult
-    static func writeCameraLED(_ on: Int) -> Bool {
-        guard let size = cameraLEDKeyInfo() else { return false }
-        do {
-            _ = try withConnection { connection in
-                var request = SMCParamStruct()
-                request.key = lsOOKey
-                request.data8 = kSMCWriteKey
-                request.keyInfo.dataSize = size
-                request.bytes.0 = UInt8(min(max(on, 0), 1))
-                return try call(connection, request)
-            }
-            return true
-        } catch {
-            return false
-        }
+    /// Writes the LED state (0/1) using an already-validated size. Throws when
+    /// the SMC rejects the write (e.g. not privileged / read-only key).
+    static func writeValue(connection: io_connect_t, size: UInt32, value: Int) throws {
+        var request = SMCParamStruct()
+        request.key = lsOOKey
+        request.data8 = kSMCWriteKey
+        request.keyInfo.dataSize = size
+        request.bytes.0 = UInt8(min(max(value, 0), 1))
+        _ = try call(connection, request)
     }
 }
 
-/// Drives the front camera LED through the SMC `LSOO` key, `count` times.
+/// Drives the front camera LED, `count` times, via two mechanisms:
 ///
-/// The LED is an on/off byte, so "flash N times" is an inverse pulse, exactly
-/// like the Caps Lock LED: the resting state is read once, then each cycle
-/// writes its inverse and back to the resting state, so a cycle ends where it
-/// started and never leaves the LED on the wrong side. Best-effort: when the
-/// `AppleSMC` service or the `LSOO` key is unavailable (or the write is not
-/// privileged) the channel no-ops and the diagnostic log records why.
+/// 1. **SMC `LSOO`** (fast, ~250ms/blink) — the clean path, used when the key
+///    is present and writable on this machine.
+/// 2. **AVCaptureSession open/close** (fallback, ~4s/blink) — on Intel Macs
+///    the LED is hardware-interlocked to the camera sensor, so powering the
+///    sensor on/off reliably lights it. The PMIC enforces a ~3s minimum on-
+///    time, so capture blinks are slower.
 ///
-/// On modern Macs the camera LED is hardware-interlocked to the sensor, so
-/// while the camera is genuinely active the SMC write may be overridden — the
-/// same best-effort posture as the keyboard backlight.
+/// The SMC path is tried first; on any failure (service missing, key unknown,
+/// write rejected) the capture fallback takes over so the LED still blinks.
+/// Both are best-effort and log their outcome; neither can crash the app.
 final class CameraLEDFlasher: @unchecked Sendable {
-    /// Serial queue so overlapping answer cycles cannot interleave SMC writes.
+    /// Serial queue so overlapping answer cycles cannot interleave LED writes.
     private let queue = DispatchQueue(label: "openrubric.camera-led")
-    /// Seconds each on/off phase lasts before returning.
+    /// SMC path: seconds each on/off phase lasts.
     private let pulseGap: Double
+    /// Capture path: sensor-on time (must clear the ~3s PMIC minimum on-time).
+    private let captureOn: Double
+    /// Capture path: sensor-off time.
+    private let captureOff: Double
 
     init(pulseGap: Double = 0.25) {
         self.pulseGap = pulseGap
+        // Capture-fallback timing: the camera PMIC enforces a ~3s minimum LED
+        // on-time after the sensor powers down (hardware interlock), so the
+        // off-phase must exceed that for the blink to be *visible* as on-then-
+        // off. 3.0s on triggers the LED; 4.0s off lets it fully decay. Slower
+        // than the SMC path but reliable on hardware where LSOO is absent.
+        self.captureOn = 3.0
+        self.captureOff = 4.0
     }
 
-    /// Blinks the front camera LED `count` times.
+    /// Blinks the front camera LED `count` times (SMC first, capture fallback).
     func flash(count: Int) {
         queue.async {
-            guard let resting = SMC.readCameraLED() else {
-                FlashDiagnostics.note("flash: cameraLED NOT AVAILABLE (AppleSMC/LSOO missing or not privileged) — skipped")
+            do {
+                try self.flashViaSMC(count: count)
                 return
+            } catch {
+                FlashDiagnostics.note("flash: cameraLED SMC unavailable (\(error)) — trying capture fallback")
             }
-            FlashDiagnostics.note("flash: cameraLED resting=\(resting) count=\(count)")
+            self.flashViaCapture(count: count)
+        }
+    }
+
+    /// Fast path: read the resting state once, then pulse its inverse `count`
+    /// times on a single SMC connection, always ending at the resting state.
+    private func flashViaSMC(count: Int) throws {
+        try SMC.withConnection { connection in
+            let info = try SMC.keyInfo(connection: connection)
+            let resting = try SMC.readValue(connection: connection, size: info.size)
+            FlashDiagnostics.note("flash: cameraLED [SMC] resting=\(resting) count=\(count)")
             let levels = FlashMath.cameraLEDPulse(resting: resting)
             for cycle in 0..<count {
-                let ok = SMC.writeCameraLED(levels.set)
-                if cycle == 0 {
-                    FlashDiagnostics.note("flash: cameraLED first write=\(ok ? "success" : "rejected") (set=\(levels.set))")
-                }
+                try SMC.writeValue(connection: connection, size: info.size, value: levels.set)
                 Thread.sleep(forTimeInterval: self.pulseGap)
-                _ = SMC.writeCameraLED(levels.restore)
+                try SMC.writeValue(connection: connection, size: info.size, value: levels.restore)
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
-            FlashDiagnostics.note("flash: cameraLED done — \(count) blink(s) sent")
+            FlashDiagnostics.note("flash: cameraLED [SMC] done — \(count) blink(s)")
+        }
+    }
+
+    /// Fallback path: power the camera sensor on/off `count` times; the
+    /// hardware-interlocked LED follows. Requires camera permission (prompted
+    /// once). Slower than SMC because of the sensor's minimum on-time.
+    private func flashViaCapture(count: Int) {
+        guard cameraAuthorized() else { return }
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (no video device) — skipped")
+            return
+        }
+        let session = AVCaptureSession()
+        session.sessionPreset = .low
+        guard let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (cannot create input) — skipped")
+            return
+        }
+        session.addInput(input)
+        FlashDiagnostics.note("flash: cameraLED [capture] count=\(count) (LED follows sensor power)")
+        for cycle in 0..<count {
+            session.startRunning()
+            Thread.sleep(forTimeInterval: self.captureOn)
+            session.stopRunning()
+            Thread.sleep(forTimeInterval: self.captureOff)
+        }
+        FlashDiagnostics.note("flash: cameraLED [capture] done — \(count) blink(s)")
+    }
+
+    /// Ensures camera permission, prompting once when not yet decided.
+    private func cameraAuthorized() -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            let sem = DispatchSemaphore(value: 0)
+            AVCaptureDevice.requestAccess(for: .video) { _ in sem.signal() }
+            _ = sem.wait(timeout: .now() + 5)
+            let ok = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+            FlashDiagnostics.note("flash: cameraLED [capture] permission granted=\(ok)")
+            return ok
+        default:
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (no camera permission) — skipped")
+            return false
         }
     }
 }

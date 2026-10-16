@@ -58,11 +58,7 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Pulses the keyboard backlight, `count` times.
     func flashBacklight(count: Int) {
         queue.async {
-            let keyboards = Self.keyboards()
-            FlashDiagnostics.note("flash: backlight count=\(count) keyboards=\(keyboards.count)")
-            for keyboard in keyboards {
-                Self.pulseBacklight(keyboard: keyboard, count: count, gap: self.pulseGap)
-            }
+            Self.pulseBacklight(count: count, gap: self.pulseGap)
         }
     }
 
@@ -146,55 +142,76 @@ final class KeyboardFlasher: @unchecked Sendable {
     /// Pulses the keyboard backlight, `count` times, restoring the original
     /// level afterwards.
     ///
-    /// Backlight elements appear in different shapes depending on the
-    /// hardware, so several page/usage pairs are probed in order (the ordered
-    /// candidate list lives in `FlashMath.backlightCandidates`, which is unit
-    /// tested). The first candidate that matches an element wins. The two
-    /// levels of a pulse are decided by `FlashMath.backlightPulse`:
-    ///   - backlight on  -> dim to 0, restore to the original level;
-    ///   - backlight off -> blip up to a minimum visible level, back to 0.
-    /// Both are clamped to the element's maximum value, so no out-of-range
-    /// write is ever sent.
-    private static func pulseBacklight(keyboard: IOHIDDevice, count: Int, gap: Double) {
-        // Look candidates up in order and stop at the first one that matches
-        // an element (early break: built-in keyboards hit the Apple vendor
-        // page first, so the common case is a single lookup). The "first
-        // non-empty wins" selection is still the pure, unit-tested policy.
-        var found: [[IOHIDElement]] = []
-        for candidate in FlashMath.backlightCandidates {
-            let elements = matchingElements(on: keyboard, page: candidate.page, usage: candidate.usage)
-            found.append(elements)
-            if !elements.isEmpty { break }
-        }
-        guard let index = FlashMath.firstMatchingCandidateIndex(found.map(\.count)),
-              let element = found[index].first else {
-            FlashDiagnostics.note("flash: backlight element NOT FOUND (candidate counts: \(found.map(\.count)))")
+    /// The built-in keyboard's HID backlight element cannot be read reliably
+    /// (`readElement FAILED` — the element is an output element and its
+    /// "value" is managed by the LMU firmware), so the pulse is driven through
+    /// the **`AppleLMUController`** IOKit service instead (the same path used
+    /// by keyboardparty / maclight / macbook-brightness, all of which work on
+    /// Intel Macs):
+    ///   - selector 1 = get current LED brightness (0...0xFFF on 12-bit
+    ///     hardware; the read value is the scale ceiling);
+    ///   - selector 2 = set LED brightness (input [0, level]).
+    /// The current level is read first so it can be restored after the
+    /// pulse; a level of 0 means the backlight is off and the pulse blips up
+    /// to a minimum visible level and back. When `AppleLMUController` is
+    /// absent (e.g. an external-only setup) the channel no-ops and the log
+    /// says why. External RGB keyboards (Logitech etc.) are not driven here.
+    private static func pulseBacklight(count: Int, gap: Double) {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleLMUController"))
+        guard service != 0 else {
+            FlashDiagnostics.note("flash: backlight AppleLMUController NOT FOUND — skipped")
             return
         }
-
-        // Read the current level so it can be restored after the pulse; a
-        // failed read means we cannot restore, so skip (best-effort channel).
-        guard let original = readElement(keyboard: keyboard, element: element) else {
-            FlashDiagnostics.note("flash: backlight readElement FAILED (cannot restore, skipped)")
+        defer { IOObjectRelease(service) }
+        var connection: io_connect_t = 0
+        let openStatus = IOServiceOpen(service, mach_task_self_, 0, &connection)
+        guard openStatus == KERN_SUCCESS else {
+            FlashDiagnostics.note("flash: backlight IOServiceOpen FAILED status=\(openStatus) — skipped")
             return
         }
+        defer { IOServiceClose(connection) }
 
-        let maxValue = Int(IOHIDElementGetLogicalMax(element))
-        let pulseLevel = FlashMath.backlightPulseLevel(maxValue: maxValue)
-        FlashDiagnostics.note("flash: backlight element found candidate=\(index) max=\(maxValue) original=\(original) pulseLevel=\(pulseLevel)")
-        guard FlashMath.backlightPulseVisible(original: original, maxValue: maxValue, pulseLevel: pulseLevel) else {
-            FlashDiagnostics.note("flash: backlight pulse not visible (skipped)")
-            return
-        }
-        let levels = FlashMath.backlightPulse(original: original, maxValue: maxValue, pulseLevel: pulseLevel)
-
-        for cycle in 0..<count {
-            let writeStatus = setElement(keyboard: keyboard, element: element, value: levels.set)
-            if cycle == 0 {
-                FlashDiagnostics.note("flash: backlight first write status=\(writeStatus) (0=success)")
+        func call(_ selector: UInt32, _ input: [UInt64]) -> UInt64? {
+            var input = input
+            var output: [UInt64] = [0]
+            let kr = IOConnectCallScalarMethod(
+                connection, selector,
+                &input, UInt32(input.count),
+                &output, &output.count
+            )
+            guard kr == KERN_SUCCESS else {
+                FlashDiagnostics.note("flash: backlight selector=\(selector) IOConnectCallScalarMethod FAILED status=\(kr)")
+                return nil
             }
+            return output.first
+        }
+
+        guard let originalRaw = call(1, [0]) else { return }
+        let scale = Int(max(originalRaw, 1))
+        let blip = UInt64(FlashMath.backlightPulseLevel(maxValue: scale))
+        let (pulseLevel, restoreLevel): (UInt64, UInt64)
+        if originalRaw > 0 {
+            // Backlight on: dim to 0, restore the original level.
+            pulseLevel = 0
+            restoreLevel = originalRaw
+        } else {
+            // Backlight off: blip up to a minimum visible level, back to 0.
+            pulseLevel = blip
+            restoreLevel = 0
+        }
+        if pulseLevel == restoreLevel {
+            FlashDiagnostics.note("flash: backlight pulse not visible (original=\(originalRaw)) — skipped")
+            return
+        }
+        FlashDiagnostics.note("flash: backlight count=\(count) original=\(originalRaw) pulse=\(pulseLevel) restore=\(restoreLevel)")
+        for cycle in 0..<count {
+            let kr = call(2, [0, pulseLevel])
+            if cycle == 0 && kr == nil { return }
             Thread.sleep(forTimeInterval: gap)
-            _ = setElement(keyboard: keyboard, element: element, value: levels.restore)
+            let kr2 = call(2, [0, restoreLevel])
+            if cycle == 0 {
+                FlashDiagnostics.note("flash: backlight first write=\(kr2 == nil ? "FAILED" : "ok")")
+            }
             Thread.sleep(forTimeInterval: gap)
         }
         FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent")

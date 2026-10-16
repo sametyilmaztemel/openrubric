@@ -24,5 +24,9 @@
 	<!-- Screen recording prompt (ScreenCaptureKit). -->
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>OpenRubric captures the screen region around your cursor to read the exam question.</string>
+	<!-- Camera prompt (camera-LED fallback blinks the sensor power; no video
+	     is ever stored or transmitted — BYO-key, zero telemetry). -->
+	<key>NSCameraUsageDescription</key>
+	<string>OpenRubric briefly powers the camera to blink its indicator LED as a discreet answer channel. No video is stored or sent.</string>
 </dict>
 </plist>
