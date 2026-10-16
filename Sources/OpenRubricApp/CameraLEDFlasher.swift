@@ -42,22 +42,31 @@ enum SMC {
     }
 
     private struct SMCKeyInfoData {
-        var dataSize: IOByteCount = 0
+        // Canonical C layout (informationsea/smc smc.h, Apple's original
+        // pmconfigd): `dataSize` is a UInt32 here, NOT IOByteCount/UInt64.
+        // The beltex/SMCKit variant (IOByteCount + a trailing `padding` field)
+        // lays out at 96 bytes and fails its own stride==80 assert on modern
+        // Swift (beltex/SMCKit issue #49); with the UInt32 layout and no
+        // padding field the whole struct is exactly 80 bytes with the
+        // canonical offsets (dataSize@28, result@40, data8@42, data32@44,
+        // bytes@48), which is what the AppleSMC driver expects.
+        var dataSize: UInt32 = 0
         var dataType: UInt32 = 0
         var dataAttributes: UInt8 = 0
     }
 
-    // 80-byte layout, mirroring the kernel SMCParamStruct. Order, types and
-    // the 32-byte `bytes` payload matter: the driver copies this struct by
-    // size, and the whole struct must be exactly 80 bytes (asserted in
-    // `withConnection`). `bytes` is the data payload; the SMC reports its
-    // real size via keyInfo.dataSize, so we only read/write the first bytes.
+    // 80-byte layout, mirroring the kernel SMCParamStruct (canonical C above).
+    // Order and types matter: the driver copies this struct by size, and the
+    // whole struct must be exactly 80 bytes (asserted in `withConnection`).
+    // There is no explicit padding field — the 1-byte `dataAttributes` leaves
+    // the alignment to the compiler, reproducing the C layout exactly.
+    // `bytes` is the data payload; the SMC reports its real size via
+    // keyInfo.dataSize, so we only read/write the first bytes.
     private struct SMCParamStruct {
         var key: UInt32 = 0
         var vers = SMCVersion()
         var pLimitData = SMCPLimitData()
         var keyInfo = SMCKeyInfoData()
-        var padding: UInt16 = 0
         var result: UInt8 = 0
         var status: UInt8 = 0
         var data8: UInt8 = 0
@@ -113,8 +122,8 @@ enum SMC {
 
     /// The key's payload size and whether it is present on this machine.
     /// `nil` when the `AppleSMC` service is missing or the key is unknown.
-    /// Typed as `IOByteCount` to match `SMCParamStruct.keyInfo.dataSize`.
-    static func cameraLEDKeyInfo() -> IOByteCount? {
+    /// Typed as `UInt32` to match `SMCParamStruct.keyInfo.dataSize`.
+    static func cameraLEDKeyInfo() -> UInt32? {
         do {
             return try withConnection { connection in
                 var request = SMCParamStruct()
