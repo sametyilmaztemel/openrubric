@@ -379,7 +379,7 @@ final class KeyboardFlasher: @unchecked Sendable {
         let probe = CoreBrightness.setBrightness(id, dimmed)
         guard let probe, abs(probe - dimmed) < 0.05 else {
             _ = CoreBrightness.setBrightness(id, restored)
-            FlashDiagnostics.note("flash: backlight [CoreBrightness] dim write not observable (set=\(dimmed) readback=\(probe.map(String.init) ?? "nil"))")
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] dim write not observable (set=\(dimmed) readback=\(probe.map { String($0) } ?? "nil"))")
             return false
         }
         Thread.sleep(forTimeInterval: gap)

@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import CoreGraphics
+import Quartz
 import Darwin
 import IOKit
 import OpenRubricCore
@@ -120,14 +121,18 @@ final class ScreenFlasher: @unchecked Sendable {
     private func mechanisms() -> [Mechanism] {
         var list: [Mechanism] = []
 
-        // 0. DisplayServices (Apple Silicon primary). Success == 0; a non-zero
-        //    return means "no brightness / not controllable" -> nil.
+        // 0. DisplayServices (Apple Silicon primary). Trust the return code:
+        //    == 0 means we got a value (0.0 is a genuinely dark panel, not a
+        //    failure); non-zero means "no brightness / not controllable" -> nil.
+        //    (Crisp: do NOT require > 0 and fall through — the CoreDisplay
+        //    fallback reads a stale 1.0 on macOS 26, which would brighten a
+        //    dark screen. `screenFlashEnabled` handles the "already at 0" skip.)
         if let get = self.dsGet, let set = self.dsSet {
             list.append(Mechanism(name: "DisplayServices",
                                   read: { d in
                                     var v: Float = 0
-                                    guard get(d, &v) == 0, v > 0 else { return nil }
-                                    return Double(v)
+                                    guard get(d, &v) == 0 else { return nil }
+                                    return Double(min(max(v, 0), 1))
                                   },
                                   write: { d, level in _ = set(d, Float(level)) }))
         }
