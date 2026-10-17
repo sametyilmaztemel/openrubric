@@ -60,6 +60,23 @@ enum CoreBrightness {
         var resolved = false
     }
 
+    /// Runs `body` on the main thread and returns its result.
+    ///
+    /// The `KeyboardBrightnessClient` instance is a private CoreBrightness
+    /// object that is **not** safe to touch from a pooled GCD worker thread —
+    /// on the user's Apple Silicon x13 the second answer (delivered from a
+    /// different worker thread) SEGV'd inside `-[KeyboardBrightnessClient
+    /// copyKeyboardBacklightIDs]`. Confining every instance IMP call to the
+    /// main thread fixes it. The callers (flasher serial queues) are never the
+    /// main thread, so a `main.sync` hop is deadlock-free; the `isMainThread`
+    /// guard makes nested hops (setBrightness → getBrightness) run inline.
+    private static func onMain<T>(_ body: @escaping () -> T) -> T {
+        if Thread.isMainThread {
+            return body()
+        }
+        return DispatchQueue.main.sync(execute: body)
+    }
+
     /// Loads the framework and resolves `KeyboardBrightnessClient`'s methods.
     /// Returns true when the client is usable. Safe to call repeatedly; runs on
     /// the caller's (serial) queue, so the `resolved` flag needs no sync.
@@ -100,46 +117,65 @@ enum CoreBrightness {
         // to send +alloc, then -init. `perform` returns the ObjC result as an
         // Unmanaged +1 reference, so takeRetainedValue() consumes it correctly
         // (a bare `as AnyObject?` would store the Unmanaged box, not the object).
-        let clsInstance = cls as AnyObject
-        if let allocUnmanaged = clsInstance.perform(Selector("alloc")) {
+        //
+        // The alloc/init of the client is also confined to the main thread: the
+        // object must be created and used on the same thread it is safe on, so
+        // creating it on main and never touching it off-main keeps it stable.
+        // `cls` is captured (a class reference is Sendable) so the closure only
+        // holds Sendable values under Swift 6 strict concurrency.
+        let instance = onMain { () -> AnyObject? in
+            let clsInstance = cls as AnyObject
+            guard let allocUnmanaged = clsInstance.perform(Selector("alloc")) else { return nil }
             let allocObj = allocUnmanaged.takeRetainedValue()
-            if let initUnmanaged = allocObj.perform(Selector("init")) {
-                state.instance = initUnmanaged.takeRetainedValue()
-            }
+            guard let initUnmanaged = allocObj.perform(Selector("init")) else { return nil }
+            return initUnmanaged.takeRetainedValue()
         }
+        state.instance = instance
         return state.instance != nil && state.copyIDs != nil && state.setBrightness != nil
     }
 
     /// IDs of the backlit keyboards the system reports (`UInt64`). Empty when
     /// there is no built-in backlit keyboard or the class is unavailable.
     static func keyboardIDs() -> [UInt64] {
-        guard let ids = state.copyIDs, let obj = state.instance else { return [] }
-        // `copy…` returns +1, so consume the reference with takeRetainedValue.
-        let arr = ids(obj, Selector(("copyKeyboardBacklightIDs"))).takeRetainedValue()
+        // Only the Sendable `state` box is captured, so the main-thread hop is
+        // clean under Swift 6 strict concurrency.
+        let arr: NSArray = onMain {
+            guard let ids = state.copyIDs, let obj = state.instance else { return [] }
+            // `copy…` returns +1, so consume the reference with takeRetainedValue.
+            return ids(obj, Selector(("copyKeyboardBacklightIDs"))).takeRetainedValue()
+        }
         return arr.compactMap { ($0 as? NSNumber)?.uint64Value }
     }
 
     static func isBuiltIn(_ id: UInt64) -> Bool {
-        guard let fn = state.isBuiltIn, let obj = state.instance else { return false }
-        return fn(obj, Selector(("isKeyboardBuiltIn:")), id).boolValue
+        onMain {
+            guard let fn = state.isBuiltIn, let obj = state.instance else { return false }
+            return fn(obj, Selector(("isKeyboardBuiltIn:")), id).boolValue
+        }
     }
 
     /// Current backlight level (0...1) for `id`, or nil on failure.
     static func getBrightness(_ id: UInt64) -> Float? {
-        guard let fn = state.getBrightness, let obj = state.instance else { return nil }
-        return fn(obj, Selector(("brightnessForKeyboard:")), id)
+        onMain {
+            guard let fn = state.getBrightness, let obj = state.instance else { return nil }
+            return fn(obj, Selector(("brightnessForKeyboard:")), id)
+        }
     }
 
     /// Writes a 0...1 level and returns the value read back, so the caller can
     /// verify the write actually moved the hardware (the CoreBrightness property
     /// can be a state mirror on some OS versions). Returns nil when the write
-    /// was rejected.
+    /// was rejected. The whole sequence (set + read-back) is confined to the
+    /// main thread so the set and its verification hit the same thread context.
     @discardableResult
     static func setBrightness(_ id: UInt64, _ level: Float) -> Float? {
-        guard let fn = state.setBrightness, let obj = state.instance else { return nil }
-        let ok = fn(obj, Selector(("setBrightness:forKeyboard:")), level, id).boolValue
-        guard ok else { return nil }
-        return getBrightness(id)
+        onMain {
+            guard let fn = state.setBrightness, let obj = state.instance else { return nil }
+            let ok = fn(obj, Selector(("setBrightness:forKeyboard:")), level, id).boolValue
+            guard ok else { return nil }
+            guard let get = state.getBrightness else { return nil }
+            return get(obj, Selector(("brightnessForKeyboard:")), id)
+        }
     }
 }
 #endif

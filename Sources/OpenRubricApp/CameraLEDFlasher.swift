@@ -83,6 +83,12 @@ enum SMC {
         var vers = SMCVersion()
         var pLimitData = SMCPLimitData()
         var keyInfo = SMCKeyInfoData()
+        // 2-byte pad present in the kernel C struct (between keyInfo and
+        // result). Every reference implementation (floesmc_util, chromium,
+        // MagSleep) has it; omitting it makes the Swift stride 76 instead of
+        // 80, which the stride==80 assert rejects, so the SMC path silently
+        // fell back to capture on every blink.
+        var padding: UInt16 = 0
         var result: UInt8 = 0
         var status: UInt8 = 0
         var data8: UInt8 = 0
