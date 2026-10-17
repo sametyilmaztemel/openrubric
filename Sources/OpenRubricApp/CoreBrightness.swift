@@ -22,83 +22,102 @@ import OpenRubricCore
 /// primitive `float` / `UInt64` arguments that `perform:` cannot pass. Everything
 /// is best-effort and nil-safe: an absent framework or class just yields `nil`s
 /// and the caller falls back to the Intel path.
+///
+/// All mutable state lives in a single immutable `static let` box (`State`),
+/// which is `@unchecked Sendable`: the box reference is a `let` (so it is
+/// concurrency-safe shared state), and its contents are written exactly once by
+/// `resolve()` and thereafter only read — all on the caller's serial flash
+/// queue, so the internal `var`s need no locking. This is the standard
+/// "immutable handle to a synchronized box" pattern and is what lets this file
+/// build under Swift 6's strict concurrency checking.
 enum CoreBrightness {
-    /// dlopen'd image handle, kept alive for the process lifetime.
-    private static var handle: UnsafeMutableRawPointer?
+    /// The resolved, immutable state box. A `let` of an `@unchecked Sendable`
+    /// reference type is fine as nonisolated global shared state.
+    private static let state = State()
 
+    /// Framework image path (a constant — `let` is concurrency-safe).
     private static let frameworkPath =
         "/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness"
 
-    // Resolved exactly once (on the flash queue). The IMPs are `@convention(c)`
-    // function pointers (8 bytes), matching the ABI the runtime returns — NOT
-    // Swift closures (16 bytes), which is what trapped the v0.5.4 CoreDisplay
-    // bitcast.
-    private static var clientClass: AnyClass?
-    private static var copyIDs: (@convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>)?
-    private static var isBuiltIn: (@convention(c) (AnyObject, Selector, UInt64) -> ObjCBool)?
-    private static var getBrightness: (@convention(c) (AnyObject, Selector, UInt64) -> Float)?
-    private static var setBrightness: (@convention(c) (AnyObject, Selector, Float, UInt64) -> ObjCBool)?
-    private static var instance: AnyObject?
-    private static var resolved = false
+    /// Mutable resolution state, boxed so the enclosing `static let state` is an
+    /// immutable (concurrency-safe) reference. Only `resolve()` writes to it, and
+    /// it runs on the serial flash queue; everything after is read-only.
+    private final class State: @unchecked Sendable {
+        /// dlopen'd image handle, kept alive for the process lifetime.
+        var handle: UnsafeMutableRawPointer?
+        /// `KeyboardBrightnessClient` class, or nil when unavailable.
+        var clientClass: AnyClass?
+        // The IMPs are `@convention(c)` function pointers (8 bytes), matching the
+        // ABI the runtime returns — NOT Swift closures (16 bytes), which is what
+        // trapped the v0.5.4 CoreDisplay bitcast.
+        var copyIDs: (@convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>)?
+        var isBuiltIn: (@convention(c) (AnyObject, Selector, UInt64) -> ObjCBool)?
+        var getBrightness: (@convention(c) (AnyObject, Selector, UInt64) -> Float)?
+        var setBrightness: (@convention(c) (AnyObject, Selector, Float, UInt64) -> ObjCBool)?
+        /// A live `KeyboardBrightnessClient` instance (alloc/init).
+        var instance: AnyObject?
+        /// Guards `resolve()` from running more than once.
+        var resolved = false
+    }
 
     /// Loads the framework and resolves `KeyboardBrightnessClient`'s methods.
     /// Returns true when the client is usable. Safe to call repeatedly; runs on
-    /// the caller's (serial) queue so `resolved` needs no synchronization.
+    /// the caller's (serial) queue, so the `resolved` flag needs no sync.
     static func resolve() -> Bool {
-        guard !resolved else { return clientClass != nil }
-        resolved = true
+        guard !state.resolved else { return state.clientClass != nil }
+        state.resolved = true
 
-        if handle == nil {
-            handle = dlopen(frameworkPath, RTLD_LAZY)
+        if state.handle == nil {
+            state.handle = dlopen(frameworkPath, RTLD_LAZY)
         }
         guard let cls: AnyClass = NSClassFromString("KeyboardBrightnessClient") else {
             return false
         }
-        clientClass = cls
+        state.clientClass = cls
 
         func imp(_ selector: String) -> UnsafeMutableRawPointer? {
             guard let method = class_getInstanceMethod(cls, Selector(selector)) else { return nil }
             return method_getImplementation(method)
         }
         if let i = imp("copyKeyboardBacklightIDs") {
-            copyIDs = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>).self)
+            state.copyIDs = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>).self)
         }
         if let i = imp("isKeyboardBuiltIn:") {
-            isBuiltIn = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, UInt64) -> ObjCBool).self)
+            state.isBuiltIn = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, UInt64) -> ObjCBool).self)
         }
         if let i = imp("brightnessForKeyboard:") {
-            getBrightness = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, UInt64) -> Float).self)
+            state.getBrightness = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, UInt64) -> Float).self)
         }
         if let i = imp("setBrightness:forKeyboard:") {
-            setBrightness = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, Float, UInt64) -> ObjCBool).self)
+            state.setBrightness = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector, Float, UInt64) -> ObjCBool).self)
         }
 
         // Standard alloc/init through the runtime (the class has a plain -init).
         if let alloc = cls.perform(Selector(("alloc"))) as AnyObject? {
             if let initialized = alloc.perform(Selector(("init"))) as AnyObject? {
-                instance = initialized
+                state.instance = initialized
             }
         }
-        return instance != nil && copyIDs != nil && setBrightness != nil
+        return state.instance != nil && state.copyIDs != nil && state.setBrightness != nil
     }
 
     /// IDs of the backlit keyboards the system reports (`UInt64`). Empty when
     /// there is no built-in backlit keyboard or the class is unavailable.
     static func keyboardIDs() -> [UInt64] {
-        guard let ids = copyIDs, let obj = instance else { return [] }
+        guard let ids = state.copyIDs, let obj = state.instance else { return [] }
         // `copy…` returns +1, so consume the reference with takeRetainedValue.
         let arr = ids(obj, Selector(("copyKeyboardBacklightIDs"))).takeRetainedValue()
         return arr.compactMap { ($0 as? NSNumber)?.uint64Value }
     }
 
     static func isBuiltIn(_ id: UInt64) -> Bool {
-        guard let fn = isBuiltIn, let obj = instance else { return false }
+        guard let fn = state.isBuiltIn, let obj = state.instance else { return false }
         return fn(obj, Selector(("isKeyboardBuiltIn:")), id).boolValue
     }
 
     /// Current backlight level (0...1) for `id`, or nil on failure.
     static func getBrightness(_ id: UInt64) -> Float? {
-        guard let fn = getBrightness, let obj = instance else { return nil }
+        guard let fn = state.getBrightness, let obj = state.instance else { return nil }
         return fn(obj, Selector(("brightnessForKeyboard:")), id)
     }
 
@@ -108,7 +127,7 @@ enum CoreBrightness {
     /// was rejected.
     @discardableResult
     static func setBrightness(_ id: UInt64, _ level: Float) -> Float? {
-        guard let fn = setBrightness, let obj = instance else { return nil }
+        guard let fn = state.setBrightness, let obj = state.instance else { return nil }
         let ok = fn(obj, Selector(("setBrightness:forKeyboard:")), level, id).boolValue
         guard ok else { return nil }
         return getBrightness(id)

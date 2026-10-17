@@ -374,8 +374,10 @@ final class KeyboardFlasher: @unchecked Sendable {
         }
         // Verify the dim write actually moves the value before committing to
         // the loop (catches a state-mirror property that accepts writes but
-        // never propagates).
-        guard let probe = CoreBrightness.setBrightness(id, dimmed), abs(probe - dimmed) < 0.05 else {
+        // never propagates). Read-back is captured in its own local so the
+        // guard's else-body (where `probe` is out of scope) can still log it.
+        let probe = CoreBrightness.setBrightness(id, dimmed)
+        guard let probe, abs(probe - dimmed) < 0.05 else {
             _ = CoreBrightness.setBrightness(id, restored)
             FlashDiagnostics.note("flash: backlight [CoreBrightness] dim write not observable (set=\(dimmed) readback=\(probe.map(String.init) ?? "nil"))")
             return false
