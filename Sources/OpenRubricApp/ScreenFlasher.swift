@@ -168,31 +168,46 @@ final class ScreenFlasher: @unchecked Sendable {
             self.resolve()
             let display = CGMainDisplayID()
 
-            // Pick the first mechanism whose read sees a controllable level,
-            // and remember its paired writer.
+            // Pick the mechanism whose READ and WRITE are both observable.
+            // For each mechanism in priority order: read the level, then
+            // probe-write the dim level and read it back through the SAME
+            // mechanism. Only trust a mechanism whose read-back is close to
+            // the probed level; otherwise restore and try the next. This
+            // mirrors the CoreBrightness probe (KeyboardFlasher) and SMC
+            // read-back (CameraLEDFlasher) — without it, a mechanism whose
+            // read works but whose write is a state mirror (CoreDisplay on
+            // Apple Silicon is the documented case) would be selected and the
+            // pulse would be a silent no-op.
             var chosen: Mechanism?
             var original: Double?
+            var dimmed: Double?
             for m in self.mechanisms() {
-                if let v = m.read(display) {
+                guard let v = m.read(display) else { continue }
+                guard FlashMath.screenFlashEnabled(original: CGFloat(v)) else {
+                    FlashDiagnostics.note("flash: screen already at 0 (skipped)")
+                    return
+                }
+                let probe = FlashMath.screenDimLevel(original: CGFloat(v), dimFraction: self.dimFraction)
+                m.write(display, probe)
+                let readback = m.read(display)
+                m.write(display, v) // restore before deciding; never leave dimmed
+                if let readback, abs(readback - probe) < 0.05 {
                     chosen = m
                     original = v
-                    FlashDiagnostics.note("flash: screen mechanism=\(m.name) brightness=\(v)")
+                    dimmed = probe
+                    FlashDiagnostics.note("flash: screen mechanism=\(m.name) brightness=\(v) write verified (readback=\(readback))")
                     break
                 }
+                FlashDiagnostics.note("flash: screen mechanism=\(m.name) read=\(v) write not observable (readback=\(readback.map { String($0) } ?? "nil")) — trying next")
             }
-            guard let chosen, let original else {
-                FlashDiagnostics.note("flash: screen UNAVAILABLE (no mechanism read a level; " +
+            guard let chosen, let original, let dimmed else {
+                FlashDiagnostics.note("flash: screen UNAVAILABLE (no mechanism with an observable write; " +
                     "displayServices=\((self.dsGet != nil && self.dsSet != nil) ? "ok" : "missing"), " +
                     "coreDisplay=\((self.cdGet != nil && self.cdSet != nil) ? "ok" : "missing"), " +
                     "iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
                 return
             }
-            guard FlashMath.screenFlashEnabled(original: CGFloat(original)) else {
-                FlashDiagnostics.note("flash: screen already at 0 (skipped)")
-                return
-            }
 
-            let dimmed = FlashMath.screenDimLevel(original: CGFloat(original), dimFraction: self.dimFraction)
             FlashDiagnostics.note("flash: screen [\(chosen.name)] count=\(count) brightness=\(original) dimming to \(dimmed)")
 
             for _ in 0..<count {
