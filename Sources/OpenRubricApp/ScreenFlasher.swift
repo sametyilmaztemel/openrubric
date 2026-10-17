@@ -13,20 +13,29 @@ import OpenRubricCore
 /// CoreDisplay symbol resolution produced — see the `@convention(c)` note
 /// below) would otherwise kill the app before the menu-bar item appears.
 ///
-/// Two mechanisms, tried in order (both best-effort, every outcome logged
-/// through `FlashDiagnostics`):
+/// Three mechanisms, tried in order (all best-effort, every outcome logged
+/// through `FlashDiagnostics`; the first whose READ sees a controllable level
+/// wins and its paired write targets the same backing value):
 ///
-/// 1. **CoreDisplay private SPI** — `CoreDisplay_Display_GetUserBrightness`
-///    / `CoreDisplay_Display_SetUserBrightness` (0...1, `double`-based).
-///    The symbols that actually move the brightness slider on modern macOS
-///    (nriley/brightness, Crisp, lux). Resolved lazily via `dlopen`/`dlsym`;
-///    the function pointers are `@convention(c)` (plain 8-byte C pointers),
-///    NOT Swift closures — a Swift closure is 16 bytes (function pointer +
-///    context) and `unsafeBitCast`-ing the 8-byte `dlsym` result to one is
-///    what trapped v0.5.4's `init` the moment the symbol was found.
-/// 2. **Public IOKit** — `IODisplayGetFloatParameter` /
-///    `IODisplaySetFloatParameter` (key `"brightness"`, 0...1) on the
-///    `IODisplayConnect` service. No private framework, no bitcast.
+/// 0. **DisplayServices private SPI** — `DisplayServicesGet/SetBrightness`.
+///    The path the maintainers of nriley/brightness and displayutil document
+///    for **Apple Silicon** (macOS 11+); the CoreDisplay functions they note
+///    "don't work on Apple Silicon Macs".
+/// 1. **CoreDisplay private SPI** — `CoreDisplay_Display_Get/SetUserBrightness`
+///    (0...1, `double`-based); the slider-moving symbols on newer Intel.
+/// 2. **IOKit** — `IODisplayGet/SetFloatParameter` (key `"brightness"`, 0...1)
+///    on the `IODisplayConnect` service.
+///
+/// This is exactly the combination every reference brightness tool uses
+/// (DisplayServices → CoreDisplay → IOKit), so it is stable on both
+/// architectures: DisplayServices carries Apple Silicon, CoreDisplay carries
+/// Intel, IOKit is the common fallback.
+///
+/// Every resolved function pointer is `@convention(c)` (a plain 8-byte C
+/// pointer, exactly what `dlsym` returns) — NOT a Swift closure (16 bytes:
+/// function pointer + context). `unsafeBitCast`-ing an 8-byte `dlsym` result
+/// to a Swift closure is what trapped v0.5.4's `init` the moment the symbol
+/// was found; with `@convention(c)` types the bitcast cannot trap on size.
 ///
 /// The pulse dims the display to a small fraction of its original level and
 /// restores it, `count` times, with a guaranteed final restore.
@@ -39,11 +48,17 @@ final class ScreenFlasher: @unchecked Sendable {
     /// Dim level as a fraction of the original brightness.
     private let dimFraction: Double
 
+    private static let displayServicesPath =
+        "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
     private static let coreDisplayPath = "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay"
 
     // Resolved lazily on the queue (see `resolve`). `@convention(c)` function
     // pointers are plain 8-byte C pointers (matching `dlsym`'s return), so the
-    // `unsafeBitCast` below cannot trap on a size mismatch.
+    // `unsafeBitCast`s below cannot trap on a size mismatch.
+    /// DisplayServices (Apple Silicon primary). Success == 0.
+    private var dsGet: (@convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32)?
+    private var dsSet: (@convention(c) (CGDirectDisplayID, Float) -> Int32)?
+    /// CoreDisplay SPI.
     private var cdGet: (@convention(c) (CGDirectDisplayID) -> Double)?
     private var cdSet: (@convention(c) (CGDirectDisplayID, Double) -> Void)?
     /// IOKit `IODisplayConnect` service for the fallback path (0 = absent).
@@ -55,13 +70,22 @@ final class ScreenFlasher: @unchecked Sendable {
         self.dimFraction = dimFraction
     }
 
-    /// Resolves the CoreDisplay SPI and IOKit service. Runs only on the serial
-    /// queue, so `resolved` needs no synchronization. Never traps: `dlopen`/
-    /// `dlsym` can only return nil, and the bitcasts are `@convention(c)` (8B).
+    /// Resolves the DisplayServices SPI, CoreDisplay SPI and IOKit service.
+    /// Runs only on the serial queue, so `resolved` needs no synchronization.
+    /// Never traps: `dlopen`/`dlsym` can only return nil, and the bitcasts are
+    /// `@convention(c)` (8 bytes).
     private func resolve() {
         guard !resolved else { return }
         resolved = true
 
+        if let handle = dlopen(Self.displayServicesPath, RTLD_LAZY) {
+            if let sym = dlsym(handle, "DisplayServicesGetBrightness") {
+                dsGet = unsafeBitCast(sym, to: (@convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32).self)
+            }
+            if let sym = dlsym(handle, "DisplayServicesSetBrightness") {
+                dsSet = unsafeBitCast(sym, to: (@convention(c) (CGDirectDisplayID, Float) -> Int32).self)
+            }
+        }
         if let handle = dlopen(Self.coreDisplayPath, RTLD_LAZY) {
             if let sym = dlsym(handle, "CoreDisplay_Display_GetUserBrightness") {
                 cdGet = unsafeBitCast(sym, to: (@convention(c) (CGDirectDisplayID) -> Double).self)
@@ -73,8 +97,69 @@ final class ScreenFlasher: @unchecked Sendable {
         ioService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"))
 
         FlashDiagnostics.note(
-            "flash: screen resolve coreDisplay=\((cdGet != nil && cdSet != nil) ? "ok" : "missing") iokit=\(ioService != 0 ? "ok" : "missing")"
+            "flash: screen resolve displayServices=\((dsGet != nil && dsSet != nil) ? "ok" : "missing") " +
+            "coreDisplay=\((cdGet != nil && cdSet != nil) ? "ok" : "missing") " +
+            "iokit=\(ioService != 0 ? "ok" : "missing")"
         )
+    }
+
+    // MARK: - Read/write pairs, in priority order
+    //
+    // Each tuple is (name, read, write). `read` returns a valid 0...1 level
+    // (or nil when the mechanism can't see the display); `write` is the paired
+    // setter, so trusting a read means the write targets the same value.
+    // `flash` picks the FIRST mechanism whose read succeeds and uses its write.
+
+    private struct Mechanism {
+        let name: String
+        let read: (CGDirectDisplayID) -> Double?
+        let write: (CGDirectDisplayID, Double) -> Void
+    }
+
+    /// Builds the ordered mechanism list. Runs on the serial queue after
+    /// `resolve()` (closures capture `self`'s resolved pointers).
+    private func mechanisms() -> [Mechanism] {
+        var list: [Mechanism] = []
+
+        // 0. DisplayServices (Apple Silicon primary). Trust the return code:
+        //    == 0 means we got a value (0.0 is a genuinely dark panel, not a
+        //    failure); non-zero means "no brightness / not controllable" -> nil.
+        //    (Crisp: do NOT require > 0 and fall through — the CoreDisplay
+        //    fallback reads a stale 1.0 on macOS 26, which would brighten a
+        //    dark screen. `screenFlashEnabled` handles the "already at 0" skip.)
+        if let get = self.dsGet, let set = self.dsSet {
+            list.append(Mechanism(name: "DisplayServices",
+                                  read: { d in
+                                    var v: Float = 0
+                                    guard get(d, &v) == 0 else { return nil }
+                                    return Double(min(max(v, 0), 1))
+                                  },
+                                  write: { d, level in _ = set(d, Float(level)) }))
+        }
+
+        // 1. CoreDisplay SPI (double 0...1; a negative return is "no value").
+        if let get = self.cdGet, let set = self.cdSet {
+            list.append(Mechanism(name: "CoreDisplay",
+                                  read: { d in
+                                    let v = get(d)
+                                    return v >= 0 ? v : nil
+                                  },
+                                  write: { d, level in set(d, level) }))
+        }
+
+        // 2. IOKit (float 0...1 on the IODisplayConnect service) — the
+        //    cross-arch fallback both reference tools use.
+        if self.ioService != 0 {
+            let svc = self.ioService
+            list.append(Mechanism(name: "IOKit",
+                                  read: { _ in
+                                    var v: Float = 0
+                                    guard IODisplayGetFloatParameter(svc, 0, "brightness" as CFString, &v) == KERN_SUCCESS, v > 0 else { return nil }
+                                    return Double(v)
+                                  },
+                                  write: { _, level in _ = IODisplaySetFloatParameter(svc, 0, "brightness" as CFString, Float(level)) }))
+        }
+        return list
     }
 
     /// Dims the main display and restores it, `count` times.
@@ -83,59 +168,62 @@ final class ScreenFlasher: @unchecked Sendable {
             self.resolve()
             let display = CGMainDisplayID()
 
-            // Read the current level, preferring CoreDisplay SPI; fall back to IOKit.
+            // Pick the mechanism whose READ and WRITE are both observable.
+            // For each mechanism in priority order: read the level, then
+            // probe-write the dim level and read it back through the SAME
+            // mechanism. Only trust a mechanism whose read-back is close to
+            // the probed level; otherwise restore and try the next. This
+            // mirrors the CoreBrightness probe (KeyboardFlasher) and SMC
+            // read-back (CameraLEDFlasher) — without it, a mechanism whose
+            // read works but whose write is a state mirror (CoreDisplay on
+            // Apple Silicon is the documented case) would be selected and the
+            // pulse would be a silent no-op.
+            var chosen: Mechanism?
             var original: Double?
-            var useCD = false
-            if let get = self.cdGet {
-                let v = get(display)
-                if v >= 0 {
+            var dimmed: Double?
+            for m in self.mechanisms() {
+                guard let v = m.read(display) else { continue }
+                guard FlashMath.screenFlashEnabled(original: CGFloat(v)) else {
+                    FlashDiagnostics.note("flash: screen already at 0 (skipped)")
+                    return
+                }
+                let probe = FlashMath.screenDimLevel(original: CGFloat(v), dimFraction: self.dimFraction)
+                m.write(display, probe)
+                let readback = m.read(display)
+                m.write(display, v) // restore before deciding; never leave dimmed
+                if let readback, abs(readback - probe) < 0.05 {
+                    chosen = m
                     original = v
-                    useCD = true
-                    FlashDiagnostics.note("flash: screen mechanism=CoreDisplay brightness=\(v)")
+                    dimmed = probe
+                    FlashDiagnostics.note("flash: screen mechanism=\(m.name) brightness=\(v) write verified (readback=\(readback))")
+                    break
                 }
+                // Restore is best-effort; verify it took so a no-op restore
+                // does not leave the display dimmed while later mechanisms are
+                // probed (their reads would then see the dimmed value).
+                let restored = m.read(display)
+                FlashDiagnostics.note("flash: screen mechanism=\(m.name) read=\(v) write not observable (readback=\(readback.map { String($0) } ?? "nil"), restored=\(restored.map { String($0) } ?? "nil"), expected=\(v)) — trying next")
             }
-            if original == nil, self.ioService != 0 {
-                var v: Float = 0
-                if IODisplayGetFloatParameter(self.ioService, 0, "brightness" as CFString, &v) == KERN_SUCCESS {
-                    original = Double(v)
-                    FlashDiagnostics.note("flash: screen mechanism=IOKit brightness=\(v)")
-                }
-            }
-            guard let original else {
-                FlashDiagnostics.note("flash: screen UNAVAILABLE (coreDisplay=\((self.cdGet != nil && self.cdSet != nil) ? "ok" : "missing"), iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
-                return
-            }
-            guard FlashMath.screenFlashEnabled(original: CGFloat(original)) else {
-                FlashDiagnostics.note("flash: screen already at 0 (skipped)")
+            guard let chosen, let original, let dimmed else {
+                FlashDiagnostics.note("flash: screen UNAVAILABLE (no mechanism with an observable write; " +
+                    "displayServices=\((self.dsGet != nil && self.dsSet != nil) ? "ok" : "missing"), " +
+                    "coreDisplay=\((self.cdGet != nil && self.cdSet != nil) ? "ok" : "missing"), " +
+                    "iokit=\(self.ioService != 0 ? "ok" : "missing")) — skipped")
                 return
             }
 
-            let dimmed = FlashMath.screenDimLevel(original: CGFloat(original), dimFraction: self.dimFraction)
-            FlashDiagnostics.note("flash: screen count=\(count) brightness=\(original) dimming to \(dimmed)")
-
-            // Build the apply closure with the chosen path bound locally (no
-            // force-unwraps): either the CoreDisplay setter or the IOKit service.
-            let apply: (Double) -> Void
-            if useCD {
-                guard let set = self.cdSet else { return }
-                apply = { level in set(display, level) }
-            } else {
-                let svc = self.ioService
-                apply = { level in
-                    _ = IODisplaySetFloatParameter(svc, 0, "brightness" as CFString, Float(level))
-                }
-            }
+            FlashDiagnostics.note("flash: screen [\(chosen.name)] count=\(count) brightness=\(original) dimming to \(dimmed)")
 
             for _ in 0..<count {
-                apply(dimmed)
+                chosen.write(display, dimmed)
                 Thread.sleep(forTimeInterval: self.pulseGap)
-                apply(original)
+                chosen.write(display, original)
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
             // Guaranteed final restore: a failed restore write in the last
             // cycle must not leave the display dimmed.
-            apply(original)
-            FlashDiagnostics.note("flash: screen done — \(count) pulse(s) sent, level restored")
+            chosen.write(display, original)
+            FlashDiagnostics.note("flash: screen [\(chosen.name)] done — \(count) pulse(s) sent, level restored")
         }
     }
 }

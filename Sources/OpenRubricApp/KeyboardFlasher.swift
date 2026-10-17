@@ -313,34 +313,106 @@ final class KeyboardFlasher: @unchecked Sendable {
         return value
     }
 
-    /// Pulses the keyboard backlight, `count` times, restoring the original
+    /// Pulses the keyboard backlight `count` times, restoring the original
     /// level afterwards.
     ///
-    /// The built-in keyboard's HID backlight element cannot be read reliably
-    /// (`readElement FAILED` — the element is an output element and its
-    /// "value" is managed by the LMU firmware), so the pulse is driven through
-    /// the **`AppleLMUController`** IOKit service instead (the same path used
-    /// by keyboardparty / maclight / macbook-brightness, all of which work on
-    /// Intel Macs):
-    ///   - selector 1 = get current LED brightness (0...0xFFF on 12-bit
-    ///     hardware; the read value is the scale ceiling);
-    ///   - selector 2 = set LED brightness (input [0, level]).
-    /// The current level is read first so it can be restored after the
-    /// pulse; a level of 0 means the backlight is off and the pulse blips up
-    /// to a minimum visible level and back. When `AppleLMUController` is
-    /// absent (e.g. an external-only setup) the channel no-ops and the log
-    /// says why. External RGB keyboards (Logitech etc.) are not driven here.
+    /// Two mechanisms, tried in order (both best-effort, logged with read-back
+    /// so the log says *which* path actually moved the hardware):
+    ///
+    /// 1. **CoreBrightness** (`KeyboardBrightnessClient`) — the path
+    ///    `corebrightnessd` responds to on **both** Apple Silicon and Intel;
+    ///    it is what System Settings' slider uses. On Apple Silicon the
+    ///    IOKit `KeyboardBacklightBrightness` property is a state mirror the
+    ///    PWM hardware ignores, and the old Intel `AppleLMUController` service
+    ///    does not exist at all — so this is the primary path. Each write is
+    ///    verified by reading the value back.
+    /// 2. **`AppleLMUController`** (Intel) — the classic IOKit scalar-method
+    ///    path (keyboardparty / maclight / macbook-brightness), kept for Intel
+    ///    Macs where CoreBrightness is unavailable or read-back fails.
+    ///
+    /// The current level is read first so it can be restored after the pulse;
+    /// a level of 0 means the backlight is off and the pulse blips up to a
+    /// minimum visible level and back.
     private static func pulseBacklight(count: Int, gap: Double) {
+        // 1. CoreBrightness (Apple Silicon + Intel).
+        if CoreBrightness.resolve() {
+            let ids = CoreBrightness.keyboardIDs()
+            // Prefer the built-in keyboard; fall back to the first ID.
+            let target = ids.first(where: CoreBrightness.isBuiltIn) ?? ids.first
+            if let id = target {
+                if pulseBacklightViaCoreBrightness(count: count, gap: gap, id: id) {
+                    return
+                }
+                FlashDiagnostics.note("flash: backlight [CoreBrightness] read-back failed for id=\(id) — trying AppleLMUController")
+            } else {
+                FlashDiagnostics.note("flash: backlight [CoreBrightness] no backlight IDs reported — trying AppleLMUController")
+            }
+        } else {
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] unavailable — trying AppleLMUController")
+        }
+
+        // 2. AppleLMUController (Intel fallback).
+        pulseBacklightViaLMU(count: count, gap: gap)
+    }
+
+    /// CoreBrightness backlight pulse. Returns true when the write was
+    /// verified by read-back (so the caller can trust the level actually
+    /// changed); false otherwise, letting the caller fall back to the Intel
+    /// path.
+    private static func pulseBacklightViaCoreBrightness(count: Int, gap: Double, id: UInt64) -> Bool {
+        guard let original = CoreBrightness.getBrightness(id) else {
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] getBrightness(id=\(id)) returned nil")
+            return false
+        }
+        // Dim level: 0 when the backlight is on (a visible dip); a fixed
+        // minimum-visible blip when it is off (0 would be invisible).
+        let dimmed: Float = original > 0 ? 0 : Float(FlashMath.backlightPulseLevel(maxValue: 1000)) / 1000
+        let restored: Float = original
+        if dimmed == restored {
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] pulse not visible (original=\(original)) — skipped")
+            return true
+        }
+        // Verify the dim write actually moves the value before committing to
+        // the loop (catches a state-mirror property that accepts writes but
+        // never propagates). Read-back is captured in its own local so the
+        // guard's else-body (where `probe` is out of scope) can still log it.
+        let probe = CoreBrightness.setBrightness(id, dimmed)
+        guard let probe, abs(probe - dimmed) < 0.05 else {
+            _ = CoreBrightness.setBrightness(id, restored)
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] dim write not observable (set=\(dimmed) readback=\(probe.map { String($0) } ?? "nil"))")
+            return false
+        }
+        Thread.sleep(forTimeInterval: gap)
+        FlashDiagnostics.note("flash: backlight [CoreBrightness] count=\(count) original=\(original) dimming to \(dimmed) (verified)")
+        for _ in 0..<count {
+            _ = CoreBrightness.setBrightness(id, dimmed)
+            Thread.sleep(forTimeInterval: gap)
+            _ = CoreBrightness.setBrightness(id, restored)
+            Thread.sleep(forTimeInterval: gap)
+        }
+        // Guaranteed final restore: a failed restore write in the last cycle
+        // must not leave the backlight dimmed.
+        let final = CoreBrightness.setBrightness(id, restored)
+        FlashDiagnostics.note("flash: backlight [CoreBrightness] done — \(count) pulse(s), restored=\(final.map { abs($0 - restored) < 0.05 } ?? false)")
+        return true
+    }
+
+    /// Intel IOKit path via `AppleLMUController` (kept for Intel Macs):
+    /// selector 1 = get current LED brightness (0...0xFFF), selector 2 = set
+    /// LED brightness (input [0, level]). No-ops (with a log) when the service
+    /// is absent, which is the Apple Silicon case — that's why CoreBrightness
+    /// is tried first.
+    private static func pulseBacklightViaLMU(count: Int, gap: Double) {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleLMUController"))
         guard service != 0 else {
-            FlashDiagnostics.note("flash: backlight AppleLMUController NOT FOUND — skipped")
+            FlashDiagnostics.note("flash: backlight [AppleLMUController] NOT FOUND (Apple Silicon?) — skipped")
             return
         }
         defer { IOObjectRelease(service) }
         var connection: io_connect_t = 0
         let openStatus = IOServiceOpen(service, mach_task_self_, 0, &connection)
         guard openStatus == KERN_SUCCESS else {
-            FlashDiagnostics.note("flash: backlight IOServiceOpen FAILED status=\(openStatus) — skipped")
+            FlashDiagnostics.note("flash: backlight [AppleLMUController] IOServiceOpen FAILED status=\(openStatus) — skipped")
             return
         }
         defer { IOServiceClose(connection) }
@@ -355,54 +427,48 @@ final class KeyboardFlasher: @unchecked Sendable {
                 &output, &outputCount
             )
             guard kr == KERN_SUCCESS else {
-                FlashDiagnostics.note("flash: backlight selector=\(selector) IOConnectCallScalarMethod FAILED status=\(kr)")
+                FlashDiagnostics.note("flash: backlight [AppleLMUController] selector=\(selector) IOConnectCallScalarMethod FAILED status=\(kr)")
                 return nil
             }
             return output
         }
 
         guard let originalRaw = call(1, [0]) else { return }
-        // Blip level for the backlight-OFF case: use a fixed 25% of the
-        // assumed 12-bit maximum (0x1000) rather than the current level —
-        // when the backlight is off the read returns 0, and a blip of
-        // 1/4095 would be invisible. On 8-bit hardware the firmware clamps
-        // 1024 to 255 (full brightness), which is still a clear blip.
+        // Blip level for the backlight-OFF case: a fixed 25% of the assumed
+        // 12-bit maximum (0x1000) — when the backlight is off the read
+        // returns 0 and a 1/4095 blip would be invisible. On 8-bit hardware
+        // the firmware clamps 1024 to 255, still a clear blip.
         let blip = UInt64(FlashMath.backlightPulseLevel(maxValue: 0x1000))
         let (pulseLevel, restoreLevel): (UInt64, UInt64)
         if originalRaw > 0 {
-            // Backlight on: dim to 0, restore the original level.
             pulseLevel = 0
             restoreLevel = originalRaw
         } else {
-            // Backlight off: blip up to a fixed visible level, back to 0.
             pulseLevel = blip
             restoreLevel = 0
         }
         if pulseLevel == restoreLevel {
-            FlashDiagnostics.note("flash: backlight pulse not visible (original=\(originalRaw)) — skipped")
+            FlashDiagnostics.note("flash: backlight [AppleLMUController] pulse not visible (original=\(originalRaw)) — skipped")
             return
         }
-        FlashDiagnostics.note("flash: backlight count=\(count) original=\(originalRaw) pulse=\(pulseLevel) restore=\(restoreLevel)")
+        FlashDiagnostics.note("flash: backlight [AppleLMUController] count=\(count) original=\(originalRaw) pulse=\(pulseLevel) restore=\(restoreLevel)")
         for cycle in 0..<count {
             let kr = call(2, [0, pulseLevel])
             if cycle == 0 && kr == nil {
-                // Nothing has been written yet — leave the level unchanged.
                 return
             }
             Thread.sleep(forTimeInterval: gap)
             let kr2 = call(2, [0, restoreLevel])
             if cycle == 0 {
-                FlashDiagnostics.note("flash: backlight first write=\(kr2 == nil ? "FAILED" : "ok")")
+                FlashDiagnostics.note("flash: backlight [AppleLMUController] first write=\(kr2 == nil ? "FAILED" : "ok")")
             }
             Thread.sleep(forTimeInterval: gap)
         }
-        // Guaranteed final restore: a failed restore write in the last cycle
-        // must not leave the backlight dimmed.
         let final = call(2, [0, restoreLevel])
         if final == nil {
-            FlashDiagnostics.note("flash: backlight FINAL restore FAILED — may be left at pulse level")
+            FlashDiagnostics.note("flash: backlight [AppleLMUController] FINAL restore FAILED — may be left at pulse level")
         } else {
-            FlashDiagnostics.note("flash: backlight done — \(count) pulse(s) sent, level restored")
+            FlashDiagnostics.note("flash: backlight [AppleLMUController] done — \(count) pulse(s) sent, level restored")
         }
     }
 
