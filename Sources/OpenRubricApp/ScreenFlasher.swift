@@ -1,7 +1,6 @@
 #if os(macOS)
 import AppKit
 import CoreGraphics
-import Quartz
 import Darwin
 import IOKit
 import OpenRubricCore
@@ -14,22 +13,23 @@ import OpenRubricCore
 /// CoreDisplay symbol resolution produced — see the `@convention(c)` note
 /// below) would otherwise kill the app before the menu-bar item appears.
 ///
-/// Four mechanisms, tried in priority order (all best-effort, every outcome
-/// logged through `FlashDiagnostics`, each paired read+write so a valid read
-/// implies the matching write moves the same backing value):
+/// Three mechanisms, tried in order (all best-effort, every outcome logged
+/// through `FlashDiagnostics`; the first whose READ sees a controllable level
+/// wins and its paired write targets the same backing value):
 ///
 /// 0. **DisplayServices private SPI** — `DisplayServicesGet/SetBrightness`.
 ///    The path the maintainers of nriley/brightness and displayutil document
 ///    for **Apple Silicon** (macOS 11+); the CoreDisplay functions they note
-///    "don't work on Apple Silicon Macs". Primary here because the target
-///    hardware is an M-series MacBook Pro.
+///    "don't work on Apple Silicon Macs".
 /// 1. **CoreDisplay private SPI** — `CoreDisplay_Display_Get/SetUserBrightness`
-///    (0...1, `double`-based); the slider-moving symbols on newer Intel and a
-///    fallback on Apple Silicon.
-/// 2. **Carbon `CGDisplayGet/SetDouble(kCGDisplayBrightness)`** — public,
-///    stable on both arches.
-/// 3. **IOKit** — `IODisplayGet/SetFloatParameter` (key `"brightness"`, 0...1)
+///    (0...1, `double`-based); the slider-moving symbols on newer Intel.
+/// 2. **IOKit** — `IODisplayGet/SetFloatParameter` (key `"brightness"`, 0...1)
 ///    on the `IODisplayConnect` service.
+///
+/// This is exactly the combination every reference brightness tool uses
+/// (DisplayServices → CoreDisplay → IOKit), so it is stable on both
+/// architectures: DisplayServices carries Apple Silicon, CoreDisplay carries
+/// Intel, IOKit is the common fallback.
 ///
 /// Every resolved function pointer is `@convention(c)` (a plain 8-byte C
 /// pointer, exactly what `dlsym` returns) — NOT a Swift closure (16 bytes:
@@ -147,12 +147,8 @@ final class ScreenFlasher: @unchecked Sendable {
                                   write: { d, level in set(d, level) }))
         }
 
-        // 2. Carbon (public, both arches).
-        list.append(Mechanism(name: "Carbon",
-                              read: Self.carbonRead,
-                              write: { d, level in _ = Self.carbonWrite(d, level) }))
-
-        // 3. IOKit (float 0...1 on the IODisplayConnect service).
+        // 2. IOKit (float 0...1 on the IODisplayConnect service) — the
+        //    cross-arch fallback both reference tools use.
         if self.ioService != 0 {
             let svc = self.ioService
             list.append(Mechanism(name: "IOKit",
@@ -164,26 +160,6 @@ final class ScreenFlasher: @unchecked Sendable {
                                   write: { _, level in _ = IODisplaySetFloatParameter(svc, 0, "brightness" as CFString, Float(level)) }))
         }
         return list
-    }
-
-    /// Reads the current brightness via the public Carbon API, or nil when the
-    /// display does not report one (typically an external display without
-    /// brightness control).
-    private static func carbonRead(_ display: CGDirectDisplayID) -> Double? {
-        var v: CGFloat = 0
-        let err = CGDisplayGetDouble(display, kCGDisplayBrightness, &v)
-        guard err == .success, v > 0 else { return nil }
-        return Double(v)
-    }
-
-    /// Writes a brightness via the public Carbon API and returns the value read
-    /// back (nil when the write was rejected).
-    private static func carbonWrite(_ display: CGDirectDisplayID, _ level: Double) -> Double? {
-        let err = CGDisplaySetDouble(display, kCGDisplayBrightness, CGFloat(level))
-        guard err == .success else { return nil }
-        var v: CGFloat = 0
-        _ = CGDisplayGetDouble(display, kCGDisplayBrightness, &v)
-        return Double(v)
     }
 
     /// Dims the main display and restores it, `count` times.
