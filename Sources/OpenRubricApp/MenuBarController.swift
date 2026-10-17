@@ -45,6 +45,9 @@ final class MenuBarController: NSObject {
         flashLog.keyEquivalentModifierMask = [.command]
         flashLog.target = self
         menu.addItem(flashLog)
+        let crashLog = NSMenuItem(title: "Crash Log…", action: #selector(showCrashLog), keyEquivalent: "")
+        crashLog.target = self
+        menu.addItem(crashLog)
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -166,6 +169,25 @@ final class MenuBarController: NSObject {
         let response = alert.runModal()
         if response == .alertFirstButtonReturn, let url = Self.flashLogURL() {
             NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    /// Shows the captured crash report (if any). Lets the user send the
+    /// signal + backtrace back without a terminal; symbolicate with the
+    /// shipped binary via `atos`/lldb if deeper analysis is needed.
+    @objc private func showCrashLog() {
+        let report = CrashReporter.takePendingReport() ?? "No crash report yet. This file is written on the next launch after the app crashes (signal or uncaught exception), with the fatal backtrace."
+        let alert = NSAlert()
+        alert.messageText = "Crash Log"
+        alert.informativeText = "If the app died, this is what it captured. Send this text back to help pinpoint the crash."
+        alert.accessoryView = makeLogTextView(report)
+        alert.addButton(withTitle: "Copy to Clipboard")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(report, forType: .string)
         }
     }
 

@@ -12,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Accessory: menu-bar-only, never steals focus from the exam.
         NSApp.setActivationPolicy(.accessory)
 
+        // Capture any crash that happens this session (and surface the
+        // previous one from the menu bar). Installed before any flasher is
+        // created so a launch-time trap is still caught.
+        CrashReporter.install()
+
         let store = AppSettingsStore()
         let history = HistoryStore(fileURL: Self.defaultHistoryURL())
         let panel = AnswerPanel()

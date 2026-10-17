@@ -199,6 +199,24 @@ final class CameraLEDFlasher: @unchecked Sendable {
     private let captureOn: Double
     /// Capture path: sensor-off time.
     private let captureOff: Double
+    // Reusable capture session (fallback path). v0.5.5 created and tore down
+    // a fresh AVCaptureSession on EVERY blink; because the v0.5.6 SMC read-back
+    // now correctly reports the LSOO no-op on Apple Silicon, that per-answer
+    // session churn runs on every answer and is the leading suspect for the
+    // "crashes after 1–2 answers" report. One persistent session, started and
+    // stopped (never re-allocated) per blink, removes the repeated
+    // alloc/start/stop churn.
+    /// Lazily-created capture session; kept for the app's lifetime.
+    private var captureSession: AVCaptureSession?
+    /// Strong reference to the current capture input so it is not deallocated
+    /// while attached to the session.
+    private var captureInput: AVCaptureDeviceInput?
+    /// Set once the capture session has been built (even if not running), so
+    /// we do not rebuild it on every blink.
+    private var captureReady = false
+    /// Set if the initial device lookup failed, to avoid re-logging the same
+    /// error on every subsequent blink attempt.
+    private var captureSetupFailed = false
 
     init(pulseGap: Double = 0.25) {
         self.pulseGap = pulseGap
@@ -294,28 +312,56 @@ final class CameraLEDFlasher: @unchecked Sendable {
     /// Fallback path: power the camera sensor on/off `count` times; the
     /// hardware-interlocked LED follows. Requires camera permission (prompted
     /// once). Slower than SMC because of the sensor's minimum on-time.
+    ///
+    /// Uses a single persistent `AVCaptureSession` (built once on first use)
+    /// rather than allocating and tearing one down on every blink. On Apple
+    /// Silicon the SMC read-back correctly reports the LSOO no-op, so this
+    /// fallback runs on every answer — and v0.5.5's per-answer session churn
+    /// was the leading suspect for the crash-after-1-2-answers report.
     private func flashViaCapture(count: Int) {
         guard cameraAuthorized() else { return }
-        guard let device = AVCaptureDevice.default(for: .video) else {
-            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (no video device) — skipped")
-            return
-        }
-        let session = AVCaptureSession()
-        session.sessionPreset = .low
-        guard let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (cannot create input) — skipped")
-            return
-        }
-        session.addInput(input)
+        guard ensureCaptureSession() else { return }
+        guard let session = captureSession else { return }
         FlashDiagnostics.note("flash: cameraLED [capture] count=\(count) (LED follows sensor power)")
-        for cycle in 0..<count {
+        for _ in 0..<count {
             session.startRunning()
             Thread.sleep(forTimeInterval: self.captureOn)
             session.stopRunning()
             Thread.sleep(forTimeInterval: self.captureOff)
         }
         FlashDiagnostics.note("flash: cameraLED [capture] done — \(count) blink(s)")
+    }
+
+    /// Lazily builds the reusable capture session on the first call. Returns
+    /// true if a usable session is ready. Device lookup failures are logged
+    /// once (via `captureSetupFailed`) so repeated blinks do not spam. Only
+    /// touched on the serial flash queue, so no extra locking.
+    private func ensureCaptureSession() -> Bool {
+        if captureReady { return true }
+        if captureSetupFailed { return false }
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (no video device) — skipped")
+            captureSetupFailed = true
+            return false
+        }
+        guard let input = try? AVCaptureDeviceInput(device: device) else {
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (cannot create input) — skipped")
+            captureSetupFailed = true
+            return false
+        }
+        let session = AVCaptureSession()
+        session.sessionPreset = .low
+        guard session.canAddInput(input) else {
+            FlashDiagnostics.note("flash: cameraLED [capture] UNAVAILABLE (session cannot add input) — skipped")
+            captureSetupFailed = true
+            return false
+        }
+        session.addInput(input)
+        self.captureSession = session
+        self.captureInput = input
+        self.captureReady = true
+        FlashDiagnostics.note("flash: cameraLED [capture] session ready (device=\(device.uniqueID))")
+        return true
     }
 
     /// Ensures camera permission, prompting once when not yet decided.

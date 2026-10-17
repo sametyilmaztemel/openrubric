@@ -337,8 +337,16 @@ final class KeyboardFlasher: @unchecked Sendable {
         // 1. CoreBrightness (Apple Silicon + Intel).
         if CoreBrightness.resolve() {
             let ids = CoreBrightness.keyboardIDs()
+            let builtInID = ids.first(where: CoreBrightness.isBuiltIn)
             // Prefer the built-in keyboard; fall back to the first ID.
-            let target = ids.first(where: CoreBrightness.isBuiltIn) ?? ids.first
+            let target = builtInID ?? ids.first
+            // One line that tells us the whole picture from the user's machine:
+            // which IDs the system reports, which (if any) is built-in, and the
+            // current level of the chosen target. This is the exact data needed
+            // to diagnose why CoreBrightness is not moving the LED on a given
+            // machine (empty IDs vs. no built-in vs. level stuck at 0 vs.
+            // state-mirror write).
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] ids=\(ids.map { String($0) }) builtIn=\(builtInID.map { String($0) } ?? "none") target=\(target.map { String($0) } ?? "none")")
             if let id = target {
                 if pulseBacklightViaCoreBrightness(count: count, gap: gap, id: id) {
                     return
@@ -348,7 +356,7 @@ final class KeyboardFlasher: @unchecked Sendable {
                 FlashDiagnostics.note("flash: backlight [CoreBrightness] no backlight IDs reported — trying AppleLMUController")
             }
         } else {
-            FlashDiagnostics.note("flash: backlight [CoreBrightness] unavailable — trying AppleLMUController")
+            FlashDiagnostics.note("flash: backlight [CoreBrightness] unavailable (framework/class not resolved) — trying AppleLMUController")
         }
 
         // 2. AppleLMUController (Intel fallback).
