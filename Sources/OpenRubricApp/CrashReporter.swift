@@ -31,9 +31,18 @@ enum CrashReporter {
     static func install() {
         for sig in watchedSignals {
             var action = sigaction()
-            action.__sigaction_handler = .init(.handler(signalHandler))
+            // The handler lives in a C union as the struct's first field; the
+            // Swift member name for that union differs across SDK versions
+            // (`sa_handler` vs `__sigaction_handler`), so write the 8-byte
+            // function pointer at byte offset 0 directly. This is
+            // version-independent and async-signal-safe.
+            let handler: @convention(c) (Int32) -> Void = signalHandler
+            withUnsafeMutableBytes(of: &action) { buf in
+                let raw = unsafeBitCast(handler, to: UnsafeMutableRawPointer.self)
+                buf.baseAddress!.storeBytes(of: raw, toByteOffset: 0, as: UnsafeMutableRawPointer.self)
+            }
             sigemptyset(&action.sa_mask)
-            action.sa_flags = sa_nodefault
+            action.sa_flags = Int32(SA_NODEFAULT)
             sigaction(sig, &action, nil)
         }
         NSSetUncaughtExceptionHandler { exception in
@@ -58,21 +67,27 @@ enum CrashReporter {
         lines.append("epoch=\(time(nil))\n")
         lines.append("backtrace:\n")
         // backtrace()/backtrace_symbols() are the standard way to capture the
-        // frames in a signal handler; they only read process memory.
-        var buffer = [UnsafeRawPointer?](repeating: nil, count: 64)
-        let n = backtrace(&buffer, 64)
-        if let symbols = backtrace_symbols(&buffer, n) {
-            for i in 0..<n {
+        // frames in a signal handler; they only read process memory. On macOS
+        // the buffer is `UnsafeMutablePointer<UnsafeMutableRawPointer?>?`.
+        var buffer = [UnsafeMutableRawPointer?](repeating: nil, count: 64)
+        let n = buffer.withUnsafeMutableBufferPointer { bp -> Int32 in
+            backtrace(bp.baseAddress, Int32(bp.count))
+        }
+        if n > 0, let symbols = backtrace_symbols(&buffer, n) {
+            for i in 0..<Int(n) {
                 lines.append(String(cString: symbols[i]) + "\n")
             }
             free(symbols)
         }
         writeAll(lines.joined())
 
-        // Restore the default disposition and re-raise, so the crash is
-        // still delivered to the system (and we don't re-enter the handler).
+        // Restore the default disposition and re-raise, so the crash is still
+        // delivered to the system (and we don't re-enter the handler).
         var action = sigaction()
-        action.__sigaction_handler = .init(.handler(SIG_DFL))
+        let raw = unsafeBitCast(SIG_DFL, to: UnsafeMutableRawPointer.self)
+        withUnsafeMutableBytes(of: &action) { buf in
+            buf.baseAddress!.storeBytes(of: raw, toByteOffset: 0, as: UnsafeMutableRawPointer.self)
+        }
         sigaction(signal, &action, nil)
         kill(getpid(), signal)
     }
