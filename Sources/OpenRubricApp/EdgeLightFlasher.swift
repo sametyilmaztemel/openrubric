@@ -14,7 +14,8 @@ import OpenRubricCore
 /// excluded from screen capture (sharingType .none) so the next crop never
 /// picks the border up, and it ignores mouse events so the exam stays
 /// interactive underneath. `init` is trivial (no I/O); the window is created
-/// lazily on the serial queue at first use.
+/// lazily on the main thread at first use (AppKit objects are @MainActor),
+/// bridged from the serial flash queue via DispatchQueue.main.sync.
 final class EdgeLightFlasher: @unchecked Sendable {
     /// Serial queue so overlapping cycles never interleave overlay shows.
     private let queue = DispatchQueue(label: "openrubric.edgelight")
@@ -23,7 +24,9 @@ final class EdgeLightFlasher: @unchecked Sendable {
     /// Border thickness in points.
     private let borderWidth: CGFloat
 
+    /// The overlay window (a @MainActor instance; only ever touched on main).
     private var window: EdgeLightWindow?
+    /// Guards the one-time build of `window`.
     private var built = false
 
     init(pulseGap: Double = 0.35, borderWidth: CGFloat = 28) {
@@ -41,13 +44,13 @@ final class EdgeLightFlasher: @unchecked Sendable {
             }
             FlashDiagnostics.note("flash: edgeLight count=\(count) border=\(Int(self.borderWidth))pt (overlay ring-light)")
             for _ in 0..<count {
-                window.show()
+                self.showOverlay(window)
                 Thread.sleep(forTimeInterval: self.pulseGap)
-                window.hide()
+                self.hideOverlay(window)
                 Thread.sleep(forTimeInterval: self.pulseGap)
             }
             // Guaranteed final hide: never leave the border lit.
-            window.hide()
+            self.hideOverlay(window)
             FlashDiagnostics.note("flash: edgeLight done — \(count) pulse(s), border off")
         }
     }
@@ -55,26 +58,45 @@ final class EdgeLightFlasher: @unchecked Sendable {
     /// Builds the overlay window once, on the main thread (AppKit windows are
     /// main-actor objects even though the flash loop runs on the serial queue).
     /// Best-effort: a missing main display just leaves `window` nil and the
-    /// flash no-ops. Called from the serial queue; a main.sync is safe here
-    /// because the serial queue is a distinct named queue, never main.
+    /// flash no-ops. `DispatchQueue.main.sync` is safe here because the caller
+    /// is the serial flash queue, never main.
     private func ensureWindow() {
         guard !built else { return }
         built = true
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
-            FlashDiagnostics.note("flash: edgeLight no NSScreen — skipped")
-            return
-        }
-        let frame = screen.frame
         let width = borderWidth
         DispatchQueue.main.sync {
-            self.window = EdgeLightWindow(screenFrame: frame, borderWidth: width)
+            self.window = MainActor.assumeIsolated {
+                guard let screen = NSScreen.main ?? NSScreen.screens.first else { return nil }
+                return EdgeLightWindow(screenFrame: screen.frame, borderWidth: width)
+            }
+        }
+        if window == nil {
+            FlashDiagnostics.note("flash: edgeLight no NSScreen — skipped")
+        }
+    }
+
+    private func showOverlay(_ window: EdgeLightWindow) {
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                window.show()
+            }
+        }
+    }
+
+    private func hideOverlay(_ window: EdgeLightWindow) {
+        DispatchQueue.main.sync {
+            MainActor.assumeIsolated {
+                window.hide()
+            }
         }
     }
 }
 
-/// The click-through glow overlay. Lives and is driven on one thread (the
-/// EdgeLightFlasher serial queue); `show`/`hide` marshal to the main thread
-/// because AppKit windows are main-actor objects.
+/// The click-through glow overlay. A `@MainActor` class because it owns an
+/// NSWindow/NSView. It is only ever touched from the main thread (the
+/// EdgeLightFlasher bridges to main via `DispatchQueue.main.sync`), so the
+/// AppKit isolation is satisfied and no locking is needed.
+@MainActor
 private final class EdgeLightWindow {
     private let window: NSWindow
     private let borderView: BorderGlowView
@@ -101,21 +123,18 @@ private final class EdgeLightWindow {
     }
 
     func show() {
-        DispatchQueue.main.async {
-            self.window.orderFrontRegardless()
-            self.borderView.animateOn()
-        }
+        window.orderFrontRegardless()
+        borderView.animateOn()
     }
 
     func hide() {
-        DispatchQueue.main.async {
-            self.borderView.animateOff()
-            self.window.orderOut(nil)
-        }
+        borderView.animateOff()
+        window.orderOut(nil)
     }
 }
 
 /// Draws a soft, bright border hugging all four edges of the display.
+/// NSView is @MainActor, so this subclass is main-actor-isolated too.
 private final class BorderGlowView: NSView {
     private let borderWidth: CGFloat
     private let glowLayer = CAGradientLayer()
