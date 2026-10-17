@@ -9,7 +9,7 @@ import OpenRubricCore
 /// Objective-C/Swift exception.
 ///
 /// The signal handler is minimal and uses only async-signal-safe primitives
-/// (write/kill/sigaction) plus the standard backtrace() pair, so installing
+/// (write, kill, signal, backtrace), so installing
 /// it cannot mask the real crash. The log is prefixed with a fixed marker so
 /// the app can detect and surface "the app crashed before this launch", and
 /// it carries a backtrace that `atos`/lldb can symbolicate against the
@@ -29,21 +29,11 @@ enum CrashReporter {
 
     /// Installs the signal + exception handlers. Idempotent.
     static func install() {
+        // BSD signal() semantics on macOS: the handler persists across
+        // delivery (no SA_RESETHAND), so we avoid the SDK-version-dependent
+        // sigaction union member name and SA_NODEFAULT entirely.
         for sig in watchedSignals {
-            var action = sigaction()
-            // The handler lives in a C union as the struct's first field; the
-            // Swift member name for that union differs across SDK versions
-            // (`sa_handler` vs `__sigaction_handler`), so write the 8-byte
-            // function pointer at byte offset 0 directly. This is
-            // version-independent and async-signal-safe.
-            let handler: @convention(c) (Int32) -> Void = signalHandler
-            withUnsafeMutableBytes(of: &action) { buf in
-                let raw = unsafeBitCast(handler, to: UnsafeMutableRawPointer.self)
-                buf.baseAddress!.storeBytes(of: raw, toByteOffset: 0, as: UnsafeMutableRawPointer.self)
-            }
-            sigemptyset(&action.sa_mask)
-            action.sa_flags = Int32(SA_NODEFAULT)
-            sigaction(sig, &action, nil)
+            _ = signal(sig, signalHandler)
         }
         NSSetUncaughtExceptionHandler { exception in
             Self.writeUncaught(exception)
@@ -75,20 +65,19 @@ enum CrashReporter {
         }
         if n > 0, let symbols = backtrace_symbols(&buffer, n) {
             for i in 0..<Int(n) {
-                lines.append(String(cString: symbols[i]) + "\n")
+                // backtrace_symbols frames are optional CChar pointers on macOS.
+                if let frame = symbols[i] {
+                    lines.append(String(cString: frame) + "\n")
+                }
             }
             free(symbols)
         }
         writeAll(lines.joined())
 
-        // Restore the default disposition and re-raise, so the crash is still
-        // delivered to the system (and we don't re-enter the handler).
-        var action = sigaction()
-        let raw = unsafeBitCast(SIG_DFL, to: UnsafeMutableRawPointer.self)
-        withUnsafeMutableBytes(of: &action) { buf in
-            buf.baseAddress!.storeBytes(of: raw, toByteOffset: 0, as: UnsafeMutableRawPointer.self)
-        }
-        sigaction(signal, &action, nil)
+        // BSD signal() persists across delivery, so restore the default
+        // disposition before re-raising to deliver the crash to the system and
+        // avoid re-entering the handler (infinite loop).
+        _ = signal(signal, SIG_DFL)
         kill(getpid(), signal)
     }
 
