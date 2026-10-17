@@ -9,13 +9,16 @@ final class FlashCoordinator: @unchecked Sendable {
     private let keyboard: KeyboardFlasher
     private let screen: ScreenFlasher
     private let camera: CameraLEDFlasher
+    private let edgeLight: EdgeLightFlasher
 
     init(keyboard: KeyboardFlasher = KeyboardFlasher(),
          screen: ScreenFlasher = ScreenFlasher(),
-         camera: CameraLEDFlasher = CameraLEDFlasher()) {
+         camera: CameraLEDFlasher = CameraLEDFlasher(),
+         edgeLight: EdgeLightFlasher = EdgeLightFlasher()) {
         self.keyboard = keyboard
         self.screen = screen
         self.camera = camera
+        self.edgeLight = edgeLight
     }
 
     /// Fires every channel in the plan. No-op for an empty plan.
@@ -31,6 +34,8 @@ final class FlashCoordinator: @unchecked Sendable {
                 screen.flash(count: plan.count)
             case .cameraLED:
                 camera.flash(count: plan.count)
+            case .edgeLight:
+                edgeLight.flash(count: plan.count)
             }
         }
     }

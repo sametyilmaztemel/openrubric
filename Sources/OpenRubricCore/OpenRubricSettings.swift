@@ -26,8 +26,30 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
     public var includeExplanation: Bool
     /// Crop side is `2 * cropRadius` (points).
     public var cropRadius: CGFloat
+    /// When true, the parsed answer is also shown in a floating panel near
+    /// the cursor. When false, only the discreet channels (LED/pulses) fire.
+    public var showAnswerPopup: Bool
     /// Discreet output channels that fire after a multiple-choice answer.
     public var flashChannels: Set<FlashChannel>
+
+    /// Backwards-compatible decode: fields added across schema versions
+    /// (`flashChannels` in v2, `showAnswerPopup` in v3) fall back to their
+    /// defaults when a saved payload predates them, so any stored settings
+    /// JSON decodes without a `keyNotFound` error. (The app-layer migration
+    /// also handles this for UserDefaults; this keeps the struct itself
+    /// robust when decoded directly.)
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.apiProvider = try c.decodeIfPresent(ApiProvider.self, forKey: .apiProvider) ?? .anthropic
+        let provider = self.apiProvider
+        self.baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? Self.defaultBaseURL(for: provider)
+        self.model = try c.decodeIfPresent(String.self, forKey: .model) ?? Self.defaultModel(for: provider)
+        self.promptMode = try c.decodeIfPresent(PromptMode.self, forKey: .promptMode) ?? .multipleChoice
+        self.includeExplanation = try c.decodeIfPresent(Bool.self, forKey: .includeExplanation) ?? true
+        self.cropRadius = try c.decodeIfPresent(CGFloat.self, forKey: .cropRadius) ?? 260
+        self.showAnswerPopup = try c.decodeIfPresent(Bool.self, forKey: .showAnswerPopup) ?? true
+        self.flashChannels = try c.decodeIfPresent(Set<FlashChannel>.self, forKey: .flashChannels) ?? [.capsLockLED]
+    }
 
     public init(
         apiProvider: ApiProvider = .anthropic,
@@ -36,6 +58,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         promptMode: PromptMode = .multipleChoice,
         includeExplanation: Bool = true,
         cropRadius: CGFloat = 260,
+        showAnswerPopup: Bool = true,
         flashChannels: Set<FlashChannel> = [.capsLockLED]
     ) {
         self.apiProvider = apiProvider
@@ -44,6 +67,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         self.promptMode = promptMode
         self.includeExplanation = includeExplanation
         self.cropRadius = cropRadius
+        self.showAnswerPopup = showAnswerPopup
         self.flashChannels = flashChannels
     }
 
