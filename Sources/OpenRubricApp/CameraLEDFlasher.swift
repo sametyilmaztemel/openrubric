@@ -252,7 +252,7 @@ final class CameraLEDFlasher: @unchecked Sendable {
             // mirror — the write "succeeds" but the LED never moves. Verifying
             // here means the capture fallback (hardware-tied, works both
             // arches) runs instead of a silent no-op.
-            guard let probe = try? SMC.readValueAfterWrite(connection, size: info.size, value: levels.set),
+            guard let probe = try? SMC.readValueAfterWrite(connection: connection, size: info.size, value: levels.set),
                   probe != resting else {
                 // Restore best-effort, then report 0 so the caller falls back.
                 try? SMC.writeValue(connection: connection, size: info.size, value: resting)

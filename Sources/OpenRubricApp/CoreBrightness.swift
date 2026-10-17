@@ -77,7 +77,10 @@ enum CoreBrightness {
 
         func imp(_ selector: String) -> UnsafeMutableRawPointer? {
             guard let method = class_getInstanceMethod(cls, Selector(selector)) else { return nil }
-            return method_getImplementation(method)
+            // method_getImplementation returns an IMP (OpaquePointer); wrap it
+            // in UnsafeMutableRawPointer so the unsafeBitCast below has a
+            // concrete 8-byte source type.
+            return UnsafeMutableRawPointer(method_getImplementation(method))
         }
         if let i = imp("copyKeyboardBacklightIDs") {
             state.copyIDs = unsafeBitCast(i, to: (@convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>).self)
@@ -93,9 +96,15 @@ enum CoreBrightness {
         }
 
         // Standard alloc/init through the runtime (the class has a plain -init).
-        if let alloc = cls.perform(Selector(("alloc"))) as AnyObject? {
-            if let initialized = alloc.perform(Selector(("init"))) as AnyObject? {
-                state.instance = initialized
+        // `cls` is a metatype (AnyClass); the class object is viewed as AnyObject
+        // to send +alloc, then -init. `perform` returns the ObjC result as an
+        // Unmanaged +1 reference, so takeRetainedValue() consumes it correctly
+        // (a bare `as AnyObject?` would store the Unmanaged box, not the object).
+        let clsInstance = cls as AnyObject
+        if let allocUnmanaged = clsInstance.perform(Selector("alloc")) {
+            let allocObj = allocUnmanaged.takeRetainedValue()
+            if let initUnmanaged = allocObj.perform(Selector("init")) {
+                state.instance = initUnmanaged.takeRetainedValue()
             }
         }
         return state.instance != nil && state.copyIDs != nil && state.setBrightness != nil
