@@ -27,13 +27,26 @@ enum CrashReporter {
     private static let marker = "OpenRubric CRASH\n"
     private static let watchedSignals: [Int32] = [SIGSEGV, SIGABRT, SIGBUS, SIGTRAP, SIGILL, SIGFPE]
 
+    /// The C handler. A literal closure with no captures so it can form a
+    /// `@convention(c)` pointer (Swift only forms C pointers from literal
+    /// closures or references to a `func`, and the `signal()` context needs
+    /// the explicit `@convention(c)` type to pick the right overload).
+    private static let cHandler: @convention(c) (Int32) -> Void = { sig in
+        Self.signalHandler(sig)
+    }
+
+    /// Re-entrancy: true while the fatal-signal handler is running. Only ever
+    /// touched from the signal context (never from two threads racing in
+    /// normal execution), so it is safe without isolation.
+    nonisolated(unsafe) static var inSignalHandler = false
+
     /// Installs the signal + exception handlers. Idempotent.
     static func install() {
         // BSD signal() semantics on macOS: the handler persists across
         // delivery (no SA_RESETHAND), so we avoid the SDK-version-dependent
         // sigaction union member name and SA_NODEFAULT entirely.
         for sig in watchedSignals {
-            _ = signal(sig, signalHandler)
+            _ = signal(sig, cHandler)
         }
         NSSetUncaughtExceptionHandler { exception in
             Self.writeUncaught(exception)
@@ -52,20 +65,26 @@ enum CrashReporter {
     // MARK: - Handlers (async-signal-safe only)
 
     private static func signalHandler(_ signal: Int32) {
+        // Re-entrancy: if a second fatal signal lands while we are already
+        // writing, just terminate (we will surface the first report).
+        if inSignalHandler {
+            _exit(128 + Int32(signal))
+        }
+        inSignalHandler = true
+
         var lines: [String] = [marker]
         lines.append("signal=\(signal) (\(Self.signalName(signal)))\n")
         lines.append("epoch=\(time(nil))\n")
         lines.append("backtrace:\n")
-        // backtrace()/backtrace_symbols() are the standard way to capture the
-        // frames in a signal handler; they only read process memory. On macOS
-        // the buffer is `UnsafeMutablePointer<UnsafeMutableRawPointer?>?`.
+        // backtrace()/backtrace_symbols() capture the frames; they only read
+        // process memory. On macOS the buffer is UnsafeMutableRawPointer? and
+        // the symbols are optional CChar pointers.
         var buffer = [UnsafeMutableRawPointer?](repeating: nil, count: 64)
         let n = buffer.withUnsafeMutableBufferPointer { bp -> Int32 in
             backtrace(bp.baseAddress, Int32(bp.count))
         }
         if n > 0, let symbols = backtrace_symbols(&buffer, n) {
             for i in 0..<Int(n) {
-                // backtrace_symbols frames are optional CChar pointers on macOS.
                 if let frame = symbols[i] {
                     lines.append(String(cString: frame) + "\n")
                 }
@@ -74,11 +93,12 @@ enum CrashReporter {
         }
         writeAll(lines.joined())
 
-        // BSD signal() persists across delivery, so restore the default
-        // disposition before re-raising to deliver the crash to the system and
-        // avoid re-entering the handler (infinite loop).
-        _ = signal(signal, SIG_DFL)
-        kill(getpid(), signal)
+        // Terminate with an exit code that encodes the fatal signal (the
+        // conventional 128 + signum). _exit is async-signal-safe and
+        // guarantees the process dies, so the report is surfaced on the next
+        // launch. (SIG_DFL is an Int32, not a handler pointer, so re-raising
+        // via signal() would need a bitcast — _exit is simpler and correct.)
+        _exit(128 + Int32(signal))
     }
 
     private static func writeUncaught(_ exception: NSException) {
