@@ -198,7 +198,11 @@ final class ScreenFlasher: @unchecked Sendable {
                     FlashDiagnostics.note("flash: screen mechanism=\(m.name) brightness=\(v) write verified (readback=\(readback))")
                     break
                 }
-                FlashDiagnostics.note("flash: screen mechanism=\(m.name) read=\(v) write not observable (readback=\(readback.map { String($0) } ?? "nil")) — trying next")
+                // Restore is best-effort; verify it took so a no-op restore
+                // does not leave the display dimmed while later mechanisms are
+                // probed (their reads would then see the dimmed value).
+                let restored = m.read(display)
+                FlashDiagnostics.note("flash: screen mechanism=\(m.name) read=\(v) write not observable (readback=\(readback.map { String($0) } ?? "nil"), restored=\(restored.map { String($0) } ?? "nil"), expected=\(v)) — trying next")
             }
             guard let chosen, let original, let dimmed else {
                 FlashDiagnostics.note("flash: screen UNAVAILABLE (no mechanism with an observable write; " +

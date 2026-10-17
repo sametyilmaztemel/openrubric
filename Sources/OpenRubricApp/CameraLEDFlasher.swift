@@ -247,16 +247,24 @@ final class CameraLEDFlasher: @unchecked Sendable {
             FlashDiagnostics.note("flash: cameraLED [SMC] resting=\(resting) count=\(count)")
             let levels = FlashMath.cameraLEDPulse(resting: resting)
             // Read-back verification: the SMC write is only trusted if a
-            // re-read shows the value actually changed. On some machines
-            // (e.g. Apple Silicon) `LSOO` is present but read-only or a state
-            // mirror — the write "succeeds" but the LED never moves. Verifying
-            // here means the capture fallback (hardware-tied, works both
-            // arches) runs instead of a silent no-op.
-            guard let probe = try? SMC.readValueAfterWrite(connection: connection, size: info.size, value: levels.set),
-                  probe != resting else {
-                // Restore best-effort, then report 0 so the caller falls back.
+            // re-read shows the value actually changed. Distinguish the two
+            // failure modes for diagnostics: the probe write or re-read THREW
+            // (connection/SMC problem) vs the re-read shows the value unchanged
+            // (LSOO is read-only or a state mirror — the Apple Silicon case).
+            // Both restore the resting state best-effort and report 0 so the
+            // caller falls back to the capture path.
+            var probe: Int?
+            do {
+                probe = try SMC.readValueAfterWrite(connection: connection, size: info.size, value: levels.set)
+            } catch {
+                probe = nil
+                FlashDiagnostics.note("flash: cameraLED [SMC] probe write/read threw: \(error)")
+            }
+            if probe == nil || probe == resting {
+                // Either the probe failed (threw) or the value did not change
+                // (LSOO read-only / state mirror).
                 try? SMC.writeValue(connection: connection, size: info.size, value: resting)
-                FlashDiagnostics.note("flash: cameraLED [SMC] write not observable (LSOO read-only/mirror?) — will use capture fallback")
+                FlashDiagnostics.note("flash: cameraLED [SMC] write not observable (probe=\(probe.map { String($0) } ?? "threw"), resting=\(resting)) — will use capture fallback")
                 return 0
             }
             // Verified: the write moved the value. Restore it before the loop.
