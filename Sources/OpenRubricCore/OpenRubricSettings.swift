@@ -39,7 +39,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
     /// also handles this for UserDefaults; this keeps the struct itself
     /// robust when decoded directly.)
     public init(from decoder: Decoder) throws {
-        let c = decoder.container(keyedBy: CodingKeys.self)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
         self.apiProvider = try c.decodeIfPresent(ApiProvider.self, forKey: .apiProvider) ?? .anthropic
         let provider = self.apiProvider
         self.baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? Self.defaultBaseURL(for: provider)
