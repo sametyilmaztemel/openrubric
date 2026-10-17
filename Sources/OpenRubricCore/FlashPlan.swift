@@ -15,6 +15,10 @@ public enum FlashChannel: String, CaseIterable, Codable, Sendable {
     /// Front camera LED blinks (SMC `LSOO`; best-effort, hardware-interlocked
     /// when the camera is active).
     case cameraLED
+    /// A bright glowing border around the display, the FaceTime "Edge Light"
+    /// ring-light look, toggled on/off `count` times (overlay-based; works on
+    /// any macOS version and display).
+    case edgeLight
 }
 
 /// The plan for one flash: which channels fire and with what count.

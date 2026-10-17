@@ -115,7 +115,11 @@ final class AppModel {
                     imagePNG: png
                 )
                 let parsed = AnswerParser.parse(result.text, mode: .init(promptMode: settings.promptMode))
-                panel.show(parsed, nearCursor: cursor)
+                if settings.showAnswerPopup {
+                    panel.show(parsed, nearCursor: cursor)
+                } else {
+                    panel.hide()
+                }
                 recordHistory(result: result, parsed: parsed, model: settings.model)
                 let enabledChannels = settings.flashChannels.map(\.rawValue).sorted()
                 FlashDiagnostics.note("cycle: parsed letter=\(parsed.letter ?? "nil") text=\(parsed.text.prefix(20)) enabledChannels=\(enabledChannels)")

@@ -22,12 +22,14 @@ final class SettingsWindowController: NSWindowController {
     private let screenFlashToggle = NSButton(checkboxWithTitle: "Screen brightness pulses", target: nil, action: nil)
     private let backlightToggle = NSButton(checkboxWithTitle: "Keyboard backlight pulses", target: nil, action: nil)
     private let cameraLEDToggle = NSButton(checkboxWithTitle: "Camera LED blinks (green, top)", target: nil, action: nil)
+    private let edgeLightToggle = NSButton(checkboxWithTitle: "Edge Light border (ring light)", target: nil, action: nil)
+    private let popupToggle = NSButton(checkboxWithTitle: "Show answer popup near cursor", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
 
     init(store: AppSettingsStore) {
         self.store = store
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -67,6 +69,13 @@ final class SettingsWindowController: NSWindowController {
         stack.addArrangedSubview(screenFlashToggle)
         stack.addArrangedSubview(backlightToggle)
         stack.addArrangedSubview(cameraLEDToggle)
+        stack.addArrangedSubview(edgeLightToggle)
+
+        let displayHeader = NSTextField(labelWithString: "Display")
+        displayHeader.font = .systemFont(ofSize: 12, weight: .semibold)
+        displayHeader.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(displayHeader)
+        stack.addArrangedSubview(popupToggle)
 
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -132,6 +141,8 @@ final class SettingsWindowController: NSWindowController {
         screenFlashToggle.state = settings.flashChannels.contains(.screenFlash) ? .on : .off
         backlightToggle.state = settings.flashChannels.contains(.keyboardBacklight) ? .on : .off
         cameraLEDToggle.state = settings.flashChannels.contains(.cameraLED) ? .on : .off
+        edgeLightToggle.state = settings.flashChannels.contains(.edgeLight) ? .on : .off
+        popupToggle.state = settings.showAnswerPopup ? .on : .off
 
         providerPicker.target = self
         providerPicker.action = #selector(providerChanged)
@@ -157,6 +168,7 @@ final class SettingsWindowController: NSWindowController {
         if screenFlashToggle.state == .on { channels.insert(.screenFlash) }
         if backlightToggle.state == .on { channels.insert(.keyboardBacklight) }
         if cameraLEDToggle.state == .on { channels.insert(.cameraLED) }
+        if edgeLightToggle.state == .on { channels.insert(.edgeLight) }
         let newSettings = OpenRubricSettings(
             apiProvider: provider,
             baseURL: baseURLField.stringValue,
@@ -164,6 +176,7 @@ final class SettingsWindowController: NSWindowController {
             promptMode: promptMode,
             includeExplanation: explanationToggle.state == .on,
             cropRadius: radius,
+            showAnswerPopup: popupToggle.state == .on,
             flashChannels: channels
         )
         do {

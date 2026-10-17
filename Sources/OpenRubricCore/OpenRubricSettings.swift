@@ -26,6 +26,9 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
     public var includeExplanation: Bool
     /// Crop side is `2 * cropRadius` (points).
     public var cropRadius: CGFloat
+    /// When true, the parsed answer is also shown in a floating panel near
+    /// the cursor. When false, only the discreet channels (LED/pulses) fire.
+    public var showAnswerPopup: Bool
     /// Discreet output channels that fire after a multiple-choice answer.
     public var flashChannels: Set<FlashChannel>
 
@@ -36,6 +39,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         promptMode: PromptMode = .multipleChoice,
         includeExplanation: Bool = true,
         cropRadius: CGFloat = 260,
+        showAnswerPopup: Bool = true,
         flashChannels: Set<FlashChannel> = [.capsLockLED]
     ) {
         self.apiProvider = apiProvider
@@ -44,6 +48,7 @@ public struct OpenRubricSettings: Codable, Equatable, Sendable {
         self.promptMode = promptMode
         self.includeExplanation = includeExplanation
         self.cropRadius = cropRadius
+        self.showAnswerPopup = showAnswerPopup
         self.flashChannels = flashChannels
     }
 
